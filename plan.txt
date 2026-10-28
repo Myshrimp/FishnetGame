@@ -1,0 +1,37 @@
+游戏类型：基于真实物理引擎和FishNet pro的多人对战派对游戏
+类型：3D俯视角
+代码框架：
+-Input:
+--InputHandler:处理所有的用户输入
+--InputComponent:输入组件，内置InputHandler
+-Core:
+--GameEntry:初始化组件
+--GameManager:MonoBehaviour，全局唯一单例，切换Scene不销毁，拥有Awake, Start, Update, LateUpdate, FixedUpdate等生命周期函数和Hook，其他组件可以挂载，可以访问其他组件
+--EventBus:事件派发中心
+--Singleton:单例模板
+--Subscriber/Notifier:适用于特定组件之间的观察者模式
+--PoolComponent/IPoolable:对于需要频繁创建、销毁的对象使用池化技术
+--SceneHandler/SceneManagementComponent:场景管理
+--GMComponent:用于测试的GM
+--LogComponent:写入文件的日志系统
+--TimeComponent/Timer:计时器系统
+--Network/ :对于Fishnet pro的封装
+---TickComponent :tick组件，可以挂载事件
+-Room:(基于FishNet Pro的联机)
+--RoomComponent:局域网房间管理
+--RoomHandler:先实现局域网联机，后续再考虑互联网联机
+-Camera:
+--ThirdPCamera/CameraMovementHandler:先实现第三人称俯视角相机脚本，不可随鼠标移动而旋转，可以通过滚轮调整视野和角度，类似于猛兽派对
+-Battle:
+--NetworkIdentity:联机玩家的身份信息，比如队伍、网络ID
+--Movement:人物移动、旋转脚本
+--Abilities/ :人物技能
+---IAbility: 技能接口，实现OnActivate, OnDeactivate, GetCoolDown, GetName, OnUse, OnUseEnd
+---Hitback:击飞
+---PickWeapon:拾取武器
+---SpeedUp:加速
+-Weapon:
+--IWeapon: 武器接口, OnAttack, OnDeactivate, OnActivate, OnHitPlayer
+
+初始实现时，除了提供一个用于输入指令的GM命令行，不考虑接入任何UI。先实现加入局域网房间，开始游戏和玩家生成、移动、拾取武器、攻击玩家、击退玩家
+GM应该包含的功能:输入/gm func Func(...)可以调用GMComponent脚本内的同名函数Func(...)
