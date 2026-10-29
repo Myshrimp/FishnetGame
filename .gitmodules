@@ -1,0 +1,3 @@
+[submodule "Assets/Art/CC0Tree"]
+	path = Assets/Art/CC0Tree
+	url = git@github.com:SkywolfGameStudios/CC0Tree.git
