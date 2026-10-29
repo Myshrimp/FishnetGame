@@ -49,6 +49,7 @@ GameObject:
   - component: {fileID: 8026038889136661727}
   - component: {fileID: 8026038889136661728}
   - component: {fileID: 153978696559328608}
+  - component: {fileID: 8026038889136661729}
   m_Layer: 0
   m_Name: Player
   m_TagString: Untagged
@@ -94,6 +95,7 @@ MonoBehaviour:
   - {fileID: 7821690488738489692}
   - {fileID: 8026038889136661727}
   - {fileID: 8026038889136661728}
+  - {fileID: 8026038889136661729}
   InitializedParentNetworkBehaviour: {fileID: 0}
   InitializedNestedNetworkObjects: []
   RuntimeParentNetworkBehaviour: {fileID: 0}
@@ -104,7 +106,7 @@ MonoBehaviour:
   _initializeOrder: 0
   _preventDespawnOnDisconnect: 0
   _defaultDespawnType: 0
-  _initializedTimestamp: -8584085119986971626
+  _initializedTimestamp: -8584083660743146184
   _localLevelOfDetailCalculationType: 0
   _useLevelOfDetail: 0
   _useRootLevelOfDetail: 1
@@ -123,7 +125,7 @@ MonoBehaviour:
   _spectatorInterpolation: 2
   _enableTeleport: 0
   _teleportThreshold: 1
-  <PrefabId>k__BackingField: 12
+  <PrefabId>k__BackingField: 7
   <SpawnableCollectionId>k__BackingField: 0
   <AssetPathHash>k__BackingField: 12503816558857295588
   SceneId: 0
@@ -218,7 +220,7 @@ MonoBehaviour:
   _jumpForce: 10
   _moveRate: 4
   _rotationSpeed: 720
-  ChargingSpeed: 12
+  ChargingSpeed: 20
   DirectionRate: 3
   _knockbackDamping: 12
 --- !u!114 &8026038889136661728
@@ -259,6 +261,27 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   _meteorVFX: {fileID: 3815089618336950037}
+--- !u!114 &8026038889136661729
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 841504549367432042}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: ece680784da23c34d9eb7211b413e133, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  _componentIndexCache: 3
+  _addedNetworkObject: {fileID: 8507615456043245900}
+  _networkObjectCache: {fileID: 8507615456043245900}
+  _holdAnchor: {fileID: 4276597705165733457}
+  _pickupRadius: 2.5
+  _projectileLayers:
+    serializedVersion: 2
+    m_Bits: 4294967295
+  _interactionCooldown: 0.15
 --- !u!1 &942793117609265119
 GameObject:
   m_ObjectHideFlags: 0

@@ -1,0 +1,6 @@
+{
+    "name": "FaceSlapper.Projectile.Tests",
+    "references": ["FishNet.Runtime"],
+    "includePlatforms": ["Editor"],
+    "optionalUnityReferences": ["TestAssemblies"]
+}
