@@ -16,6 +16,7 @@ namespace FaceSlapper.Network.Prediction
     /// Server-authoritative charge carrying. The motor invokes FollowCarrier during prediction.
     /// </summary>
     [DisallowMultipleComponent]
+    [DefaultExecutionOrder(-100)]
     public class PlayerCarryController : NetworkBehaviour
     {
         [SerializeField, Min(0.1f)] private float _carryDistance = 1.3f;
@@ -30,6 +31,11 @@ namespace FaceSlapper.Network.Prediction
         private PlayerControllerPrediction _motor;
         private CharacterController _characterController;
         private Collider[] _colliders;
+        private Transform _graphicalObject;
+        private Vector3 _viewLocalPosition;
+        private Quaternion _viewLocalRotation;
+        private bool _presentingCarry;
+        private Pose _lastCarryViewPose;
 
         public bool IsCarried => _carrier.Value != null;
 
@@ -39,11 +45,84 @@ namespace FaceSlapper.Network.Prediction
             _characterController = GetComponent<CharacterController>();
             _colliders = GetComponents<Collider>();
             _carrier.OnChange += OnCarrierChanged;
+            _graphicalObject = NetworkObject.GetGraphicalObject();
+            if (_graphicalObject == transform)
+                _graphicalObject = null;
+            if (_graphicalObject != null)
+            {
+                _viewLocalPosition = transform.InverseTransformPoint(_graphicalObject.position);
+                _viewLocalRotation = Quaternion.Inverse(transform.rotation) * _graphicalObject.rotation;
+            }
         }
 
         private void OnDestroy()
         {
+            ResetCarryPresentation(false);
             _carrier.OnChange -= OnCarrierChanged;
+        }
+
+        private void OnDisable()
+        {
+            ResetCarryPresentation(false);
+        }
+
+        public override void OnStopClient()
+        {
+            ResetCarryPresentation(false);
+            base.OnStopClient();
+        }
+
+        private void LateUpdate()
+        {
+            if (!IsClientInitialized)
+            {
+                ResetCarryPresentation(false);
+                return;
+            }
+
+            NetworkObject carrier = _carrier.Value;
+            if (carrier == null || !carrier.IsSpawned)
+            {
+                ResetCarryPresentation(true);
+                return;
+            }
+            if (_graphicalObject == null)
+                return;
+
+            Transform carrierView = carrier.GetGraphicalObject();
+            if (carrierView == null)
+                carrierView = carrier.transform;
+
+            // Use the carrier's rendered timeline, not the passenger's independent interpolation delay.
+            _graphicalObject.position = carrierView.position + carrierView.forward * _carryDistance
+                + transform.TransformVector(_viewLocalPosition);
+            _lastCarryViewPose = new Pose(_graphicalObject.position, _graphicalObject.rotation);
+            _presentingCarry = true;
+        }
+
+        private void ResetCarryPresentation(bool preservePose)
+        {
+            if (!_presentingCarry)
+                return;
+            _presentingCarry = false;
+            if (_graphicalObject == null)
+                return;
+
+            // The player prefab still uses the FishNet 4.x NetworkObject smoother.
+#pragma warning disable CS0618
+            var smoother = NetworkObject.PredictionSmoother;
+#pragma warning restore CS0618
+            if (smoother != null)
+            {
+                smoother.Teleport();
+                if (preservePose)
+                    _graphicalObject.SetPositionAndRotation(_lastCarryViewPose.position, _lastCarryViewPose.rotation);
+            }
+            else
+            {
+                _graphicalObject.SetPositionAndRotation(transform.TransformPoint(_viewLocalPosition),
+                    transform.rotation * _viewLocalRotation);
+            }
         }
 
         private void OnCarrierChanged(NetworkObject previous, NetworkObject next, bool asServer)

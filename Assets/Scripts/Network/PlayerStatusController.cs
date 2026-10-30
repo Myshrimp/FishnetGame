@@ -7,19 +7,21 @@ namespace FaceSlapper.Network.Prediction
     /// </summary>
     public sealed class PlayerStatusController
     {
-        public uint StunEndTick { get; private set; }
+        public uint StunRemainingSteps { get; private set; }
         public Vector3 KnockbackVelocity { get; private set; }
 
-        public bool IsStunned(uint tick) => tick < StunEndTick;
+        public bool IsStunned => StunRemainingSteps > 0;
 
-        public void ApplyStun(uint startTick, uint durationTicks)
+        public void ApplyStun(uint durationSteps)
         {
-            if (durationTicks == 0)
-                return;
+            if (durationSteps > StunRemainingSteps)
+                StunRemainingSteps = durationSteps;
+        }
 
-            uint endTick = startTick + durationTicks;
-            if (endTick > StunEndTick)
-                StunEndTick = endTick;
+        internal void AdvanceStun()
+        {
+            if (StunRemainingSteps > 0)
+                StunRemainingSteps--;
         }
 
         public void ApplyKnockback(Vector3 velocity)
@@ -31,15 +33,16 @@ namespace FaceSlapper.Network.Prediction
 
         public void Simulate(float delta, float damping)
         {
+            AdvanceStun();
             KnockbackVelocity = Vector3.MoveTowards(
                 KnockbackVelocity,
                 Vector3.zero,
                 damping * delta);
         }
 
-        public void Reconcile(uint stunEndTick, Vector3 knockbackVelocity)
+        public void Reconcile(uint stunRemainingSteps, Vector3 knockbackVelocity)
         {
-            StunEndTick = stunEndTick;
+            StunRemainingSteps = stunRemainingSteps;
             KnockbackVelocity = knockbackVelocity;
         }
     }

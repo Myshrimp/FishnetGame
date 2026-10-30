@@ -6,7 +6,9 @@ using System.Reflection;
 using FishNet.Managing.Predicting;
 using FishNet.Managing.Timing;
 using FishNet.Object;
+using FishNet.Object.Prediction;
 using FishNet.Object.Synchronizing;
+using FishNet.Transporting;
 using NUnit.Framework;
 using UnityEditor.TestTools;
 using UnityEngine;
@@ -88,7 +90,7 @@ public class NetworkProjectilePresentationTests
 
     [TestCase(true)]
     [TestCase(false)]
-    public void TickSmoothingDoesNotStackRigidbodyInterpolation(bool prediction)
+    public void VisualSmoothingDoesNotStackRigidbodyInterpolation(bool prediction)
     {
         CreateProjectile(prediction);
         Assert.That(_projectile.GetComponent<Rigidbody>().interpolation, Is.EqualTo(RigidbodyInterpolation.None));
@@ -120,6 +122,194 @@ public class NetworkProjectilePresentationTests
         Assert.That(_projectile.GetComponent<Rigidbody>().interpolation, Is.EqualTo(RigidbodyInterpolation.None));
         SetHeld(false);
         Assert.That(_projectile.GetComponent<Rigidbody>().interpolation, Is.EqualTo(expected));
+    }
+
+    [Test]
+    public void FlightSmoothsPositionAndRotationWithoutMovingPhysics()
+    {
+        StartPresentation(true, PhysicsMode.TimeManager);
+        Assert.That(_projectile.GetType().GetField("_smoother", Flags).GetValue(_projectile), Is.Null);
+        Invoke(_projectile, "LateUpdate");
+        Vector3 targetPosition = new(2f, 3f, 4f);
+        Quaternion targetRotation = Quaternion.Euler(40f, 100f, -20f);
+        _projectile.transform.SetPositionAndRotation(targetPosition, targetRotation);
+
+        Invoke(_projectile, "UpdateFlightSmoothing", 1f / 60f);
+
+        Assert.That(Vector3.Distance(_view.position, Vector3.zero), Is.GreaterThan(0f));
+        Assert.That(Vector3.Distance(_view.position, targetPosition), Is.GreaterThan(1f));
+        Assert.That(Quaternion.Angle(_view.rotation, targetRotation), Is.GreaterThan(10f));
+        Assert.That(_projectile.transform.position, Is.EqualTo(targetPosition));
+        Assert.That(Quaternion.Angle(_projectile.transform.rotation, targetRotation), Is.LessThan(0.001f));
+        for (int i = 0; i < 120; i++)
+            Invoke(_projectile, "UpdateFlightSmoothing", 1f / 60f);
+        Assert.That(Vector3.Distance(_view.position, targetPosition), Is.LessThan(0.001f));
+        Assert.That(Quaternion.Angle(_view.rotation, targetRotation), Is.LessThan(0.1f));
+    }
+
+    [Test]
+    public void CollisionCorrectionDoesNotSnapAndEventuallySettles()
+    {
+        StartPresentation(true, PhysicsMode.TimeManager);
+        Invoke(_projectile, "LateUpdate");
+        for (int i = 1; i <= 60; i++)
+        {
+            _projectile.transform.SetPositionAndRotation(
+                Vector3.right * (i * 0.3f), Quaternion.Euler(i * 2f, i * 12f, 0f));
+            Invoke(_projectile, "UpdateFlightSmoothing", 1f / 60f);
+        }
+        Vector3 before = _view.position;
+        Quaternion beforeRotation = _view.rotation;
+        Vector3 correctedPosition = before - Vector3.right * 3f;
+        Quaternion correctedRotation = Quaternion.Euler(10f, -120f, 90f);
+        _projectile.transform.SetPositionAndRotation(correctedPosition, correctedRotation);
+        Invoke(_projectile, "UpdateFlightSmoothing", 1f / 60f);
+        Assert.That(Vector3.Distance(_view.position, before), Is.LessThan(0.5f));
+        Assert.That(Quaternion.Angle(_view.rotation, beforeRotation), Is.LessThan(25f));
+        for (int i = 0; i < 120; i++)
+            Invoke(_projectile, "UpdateFlightSmoothing", 1f / 60f);
+        Assert.That(Vector3.Distance(_view.position, correctedPosition), Is.LessThan(0.001f));
+        Assert.That(Quaternion.Angle(_view.rotation, correctedRotation), Is.LessThan(0.1f));
+    }
+
+    [TestCase(30)]
+    [TestCase(60)]
+    [TestCase(144)]
+    public void TickSteppedFlightRemainsContinuousAtDifferentFrameRates(int frameRate)
+    {
+        StartPresentation(true, PhysicsMode.TimeManager);
+        Invoke(_projectile, "LateUpdate");
+        Vector3 previous = _view.position;
+        Quaternion previousRotation = _view.rotation;
+        for (int i = 1; i <= frameRate * 2; i++)
+        {
+            int tick = i * 30 / frameRate;
+            _projectile.transform.SetPositionAndRotation(
+                Vector3.right * (tick * 0.6f), Quaternion.Euler(0f, tick * 12f, 0f));
+            Invoke(_projectile, "UpdateFlightSmoothing", 1f / frameRate);
+            Assert.That(_view.position.x, Is.GreaterThanOrEqualTo(previous.x));
+            Assert.That(Vector3.Distance(_view.position, previous), Is.LessThan(25f / frameRate));
+            Assert.That(Quaternion.Angle(_view.rotation, previousRotation), Is.LessThan(500f / frameRate));
+            if (i > frameRate)
+                Assert.That(_view.position.x, Is.GreaterThan(previous.x), "Visual motion must continue between physics ticks.");
+            previous = _view.position;
+            previousRotation = _view.rotation;
+        }
+        Assert.That(_projectile.transform.position.x - _view.position.x, Is.InRange(1.5f, 2.8f));
+    }
+
+    [TestCase(30)]
+    [TestCase(60)]
+    [TestCase(144)]
+    public void RotationCrosses180ByTheShortestPathAndConverges(int frameRate)
+    {
+        StartPresentation(true, PhysicsMode.TimeManager);
+        _projectile.transform.rotation = Quaternion.Euler(0f, 170f, 0f);
+        Invoke(_projectile, "LateUpdate");
+        Quaternion target = Quaternion.Euler(0f, -170f, 0f);
+        _projectile.transform.rotation = target;
+        float previousError = 20f;
+        for (int i = 0; i < frameRate; i++)
+        {
+            Invoke(_projectile, "UpdateFlightSmoothing", 1f / frameRate);
+            float error = Quaternion.Angle(_view.rotation, target);
+            Assert.That(error, Is.LessThanOrEqualTo(previousError + 0.01f));
+            Assert.That(float.IsNaN(_view.rotation.w), Is.False);
+            previousError = error;
+        }
+        Assert.That(previousError, Is.LessThan(0.1f));
+    }
+
+    [Test]
+    public void ZeroDeltaTimePreservesPoseAndCanResumeSmoothing()
+    {
+        StartPresentation(true, PhysicsMode.TimeManager);
+        Invoke(_projectile, "LateUpdate");
+        _projectile.transform.SetPositionAndRotation(Vector3.one, Quaternion.Euler(20f, 90f, 45f));
+        Invoke(_projectile, "UpdateFlightSmoothing", 0f);
+        Assert.That(_view.position, Is.EqualTo(Vector3.zero));
+        Assert.That(Quaternion.Angle(_view.rotation, Quaternion.identity), Is.LessThan(0.001f));
+        Invoke(_projectile, "UpdateFlightSmoothing", 1f / 60f);
+        Assert.That(_view.position.x, Is.InRange(0.001f, 0.5f));
+        Assert.That(float.IsNaN(_view.rotation.w), Is.False);
+    }
+
+    [Test]
+    public void TeleportThresholdUsesTargetStepInsteadOfAccumulatedVisualLag()
+    {
+        StartPresentation(true, PhysicsMode.TimeManager);
+        SetField(_projectile, "_positionSmoothTime", 1f);
+        SetField(_projectile, "_teleportDistance", 5f);
+        Invoke(_projectile, "LateUpdate");
+        for (int i = 1; i <= 20; i++)
+        {
+            _projectile.transform.SetPositionAndRotation(Vector3.right * i, Quaternion.Euler(0f, i * 5f, 0f));
+            Invoke(_projectile, "UpdateFlightSmoothing", 1f / 60f);
+        }
+        Assert.That(Vector3.Distance(_view.position, _projectile.transform.position), Is.GreaterThan(5f));
+        _projectile.transform.SetPositionAndRotation(Vector3.right * 100f, Quaternion.Euler(0f, 120f, 0f));
+        Invoke(_projectile, "UpdateFlightSmoothing", 1f / 60f);
+        Assert.That(_view.position, Is.EqualTo(_projectile.transform.position));
+        Assert.That(Quaternion.Angle(_view.rotation, _projectile.transform.rotation), Is.LessThan(0.001f));
+        Invoke(_projectile, "UpdateFlightSmoothing", 1f / 60f);
+        Assert.That(_view.position, Is.EqualTo(_projectile.transform.position), "A teleport must clear damping velocity.");
+        Assert.That(Quaternion.Angle(_view.rotation, _projectile.transform.rotation), Is.LessThan(0.001f));
+    }
+
+    [Test]
+    public void DisabledTeleportThresholdSmoothsEvenLargeCorrections()
+    {
+        StartPresentation(true, PhysicsMode.TimeManager);
+        Invoke(_projectile, "LateUpdate");
+        _projectile.transform.position = Vector3.right * 100f;
+        Invoke(_projectile, "UpdateFlightSmoothing", 1f / 60f);
+        Assert.That(_view.position.x, Is.InRange(0.01f, 50f));
+    }
+
+    [Test]
+    public void StoppingOrDisablingRestoresViewAndRestartDoesNotReuseVelocity()
+    {
+        StartPresentation(true, PhysicsMode.TimeManager);
+        Invoke(_projectile, "LateUpdate");
+        _projectile.transform.SetPositionAndRotation(Vector3.right, Quaternion.Euler(0f, 90f, 0f));
+        Invoke(_projectile, "UpdateFlightSmoothing", 1f / 60f);
+        Invoke(_projectile, "OnDisable");
+        Assert.That(_view.parent, Is.EqualTo(_projectile.transform));
+        Assert.That(_view.localPosition, Is.EqualTo(Vector3.zero));
+        Invoke(_projectile, "LateUpdate");
+        Assert.That(_view.parent, Is.Null);
+        Invoke(_projectile, "UpdateFlightSmoothing", 1f / 60f);
+        Assert.That(_view.position, Is.EqualTo(Vector3.right));
+        Assert.That(Quaternion.Angle(_view.rotation, _projectile.transform.rotation), Is.LessThan(0.001f));
+        Invoke(_projectile, "OnStopClient");
+        Assert.That(_view.parent, Is.EqualTo(_projectile.transform));
+        Invoke(_projectile, "LateUpdate");
+        Assert.That(_view.parent, Is.EqualTo(_projectile.transform), "Stopped clients must not detach the view again.");
+    }
+
+    [TestCase(true)]
+    [TestCase(false)]
+    public void PositionAndRotationDampingTimesControlTheirOwnResponse(bool slowPosition)
+    {
+        StartPresentation(true, PhysicsMode.TimeManager);
+        SetField(_projectile, "_positionSmoothTime", slowPosition ? 0.3f : 0.03f);
+        SetField(_projectile, "_rotationSmoothTime", slowPosition ? 0.03f : 0.3f);
+        Invoke(_projectile, "LateUpdate");
+        _projectile.transform.SetPositionAndRotation(Vector3.right, Quaternion.Euler(0f, 90f, 0f));
+        for (int i = 0; i < 3; i++)
+            Invoke(_projectile, "UpdateFlightSmoothing", 1f / 60f);
+        float positionProgress = _view.position.x;
+        float rotationProgress = Quaternion.Angle(Quaternion.identity, _view.rotation) / 90f;
+        Assert.That(slowPosition ? positionProgress : rotationProgress, Is.LessThan(0.15f));
+        Assert.That(slowPosition ? rotationProgress : positionProgress, Is.GreaterThan(0.7f));
+    }
+
+    private void StartPresentation(bool prediction, PhysicsMode mode)
+    {
+        CreateProjectile(prediction);
+        ConfigureManagers(mode);
+        Invoke(_projectile, "OnStartNetwork");
+        Invoke(_projectile, "OnStartClient");
     }
 
     [Test]
@@ -172,6 +362,52 @@ public class NetworkProjectilePresentationTests
         Invoke(_projectile, "LateUpdate");
         Assert.That(Vector3.Distance(_view.position, before), Is.LessThan(0.0001f));
         Assert.That(Quaternion.Angle(_view.rotation, rotation), Is.LessThan(0.001f));
+    }
+
+    [UnityTest]
+    public IEnumerator PredictionReleaseKeepsLastRenderedPoseAfterTickMovesRoot()
+    {
+        yield return new EnterPlayMode();
+        CreateProjectile(true);
+        ConfigureManagers(PhysicsMode.TimeManager);
+        SetField(_networkObject, "_enablePrediction", true);
+        Invoke(_projectile, "OnStartNetwork");
+        Invoke(_projectile, "OnStartClient");
+        typeof(NetworkObject).GetProperty("ObjectId", Flags).SetValue(_networkObject, 43);
+        typeof(NetworkObject).GetProperty("IsDeinitializing", Flags).SetValue(_networkObject, false);
+        _holderView.localRotation = Quaternion.Euler(0f, 30f, 0f);
+        ReplicatePresentationState(1, 1, new Vector3(10f, 1f, 0.5f));
+        Invoke(_projectile, "LateUpdate");
+        Vector3 before = _view.position;
+        Quaternion rotation = _view.rotation;
+        ReplicatePresentationState(2, 2, new Vector3(20f, 2f, 3f));
+        Invoke(_projectile, "LateUpdate");
+        Assert.That(Vector3.Distance(_view.position, before), Is.LessThan(0.0001f));
+        Assert.That(Quaternion.Angle(_view.rotation, rotation), Is.LessThan(0.001f));
+        Assert.That(_view.parent, Is.Null);
+        Assert.That(_projectile.GetType().GetField("_smoothingActive", Flags).GetValue(_projectile), Is.True);
+        Invoke(_projectile, "OnStopClient");
+        typeof(NetworkObject).GetProperty("ObjectId", Flags).SetValue(_networkObject, NetworkObject.UNSET_OBJECTID_VALUE);
+        TearDown();
+        yield return new ExitPlayMode();
+    }
+
+    private void ReplicatePresentationState(int motion, uint sequence, Vector3 position)
+    {
+        Type type = _projectile.GetType();
+        object state = Activator.CreateInstance(type.GetNestedType("ProjectilePredictionState"));
+        SetField(state, "Motion", Enum.ToObject(type.GetNestedType("ProjectileMotionState"), motion));
+        SetField(state, "Sequence", sequence);
+        SetField(state, "Holder", motion == 1 ? _holder : null);
+        object input = Activator.CreateInstance(type.GetNestedType("ProjectileReplicateData"));
+        SetField(input, "State", state);
+        SetField(input, "HasTransition", true);
+        SetField(input, "HasHeldPose", motion == 1);
+        SetField(input, "Position", position);
+        SetField(input, "Rotation", Quaternion.identity);
+        ((IReplicateData)input).SetTick(sequence);
+        Invoke(_projectile, "PerformReplicate___UL", input,
+            ReplicateState.Ticked | ReplicateState.Created, Channel.Unreliable);
     }
 
     [UnityTest]

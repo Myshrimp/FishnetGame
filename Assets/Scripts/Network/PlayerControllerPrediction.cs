@@ -84,7 +84,7 @@ namespace FaceSlapper.Network.Prediction
                 float verticalVelocity,
                 float stamina,
                 bool isCharging,
-                uint stunEndTick,
+                uint stunRemainingSteps,
                 Vector3 knockbackVelocity)
             {
                 Position = position;
@@ -92,7 +92,7 @@ namespace FaceSlapper.Network.Prediction
                 VerticalVelocity = verticalVelocity;
                 Stamina = stamina;
                 IsCharging = isCharging;
-                StunEndTick = stunEndTick;
+                StunRemainingSteps = stunRemainingSteps;
                 KnockbackVelocity = knockbackVelocity;
                 _tick = 0;
             }
@@ -103,7 +103,7 @@ namespace FaceSlapper.Network.Prediction
             public float VerticalVelocity;
             public float Stamina;
             public bool IsCharging;
-            public uint StunEndTick;
+            public uint StunRemainingSteps;
             public Vector3 KnockbackVelocity;
 
             private uint _tick;
@@ -167,7 +167,7 @@ namespace FaceSlapper.Network.Prediction
         private PlayerCarryController _carryController;
 
         public bool IsCarried => _carryController != null && _carryController.IsCarried;
-        public bool IsStunned => Status.IsStunned(TimeManager.LocalTick);
+        public bool IsStunned => Status.IsStunned;
 
         public class PlayerState
         {
@@ -196,8 +196,8 @@ namespace FaceSlapper.Network.Prediction
                 return;
 
             float safeDuration = Mathf.Max(0f, stunDuration);
-            uint durationTicks = (uint)Mathf.CeilToInt(safeDuration / (float)TimeManager.TickDelta);
-            Status.ApplyStun(TimeManager.LocalTick, durationTicks);
+            uint durationSteps = (uint)Mathf.CeilToInt(safeDuration / (float)TimeManager.TickDelta);
+            Status.ApplyStun(durationSteps);
             Status.ApplyKnockback(knockbackVelocity);
 
             if (knockbackVelocity.y > 0f)
@@ -329,7 +329,7 @@ namespace FaceSlapper.Network.Prediction
                 _verticalVelocity,
                 Stamina,
                 State.IsCharging,
-                Status.StunEndTick,
+                Status.StunRemainingSteps,
                 Status.KnockbackVelocity);
             PerformReconcile(rd);
         }
@@ -341,6 +341,7 @@ namespace FaceSlapper.Network.Prediction
             {
                 // Ignore all owner input while carried, but keep updating the predicted transform.
                 _carryController.FollowCarrier();
+                Status.AdvanceStun();
                 return;
             }
 
@@ -449,7 +450,7 @@ namespace FaceSlapper.Network.Prediction
 
         private Vector3 GetForce(ReplicateData rd, float delta)
         {
-            bool canControl = State.FrontForcedBy <= 0 && !Status.IsStunned(rd.GetTick());
+            bool canControl = State.FrontForcedBy <= 0 && !Status.IsStunned;
             if (!canControl)
                 State.IsCharging = false;
 
@@ -518,7 +519,7 @@ namespace FaceSlapper.Network.Prediction
             _verticalVelocity = rd.VerticalVelocity;
             Stamina = rd.Stamina;
             State.IsCharging = rd.IsCharging;
-            Status.Reconcile(rd.StunEndTick, rd.KnockbackVelocity);
+            Status.Reconcile(rd.StunRemainingSteps, rd.KnockbackVelocity);
 
             /* Disable the CharacterController before applying the authoritative
              * transform so its physics state is updated at the same time. */

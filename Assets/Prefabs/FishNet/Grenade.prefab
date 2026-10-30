@@ -104,18 +104,24 @@ MonoBehaviour:
   _tickCallbacks: 6
   _usePrediction: 1
   _graphicalObject: {fileID: 6782719515954728479}
+  _positionSmoothTime: 0.12
+  _rotationSmoothTime: 0.12
+  _teleportDistance: 0
   _interpolationTicks: 2
-  _adaptiveInterpolation: 0
-  _localHoldPosition: {x: 0.55, y: 1.1, z: 0.75}
+  _localHoldPosition: {x: 0, y: 0, z: 0}
   _localHoldEulerAngles: {x: 0, y: 0, z: 0}
   _pickupDistance: 2.5
   _throwSpawnOffset: 0.3
-  _throwSpeed: 18
+  _throwSpeed: 20
   _gravity: 9.8
   _ignoreThrowerDuration: 0.35
   _knockbackSpeed: 12
   _upwardSpeed: 5
   _stunDuration: 1.25
+  _airFrictionRate: 0.5
+  _maxFrictionForce: 5
+  _enableSmoothingLogs: 0
+  _smoothingLogInterval: 0.5
 --- !u!114 &813441766683032976
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -146,7 +152,7 @@ MonoBehaviour:
   _initializeOrder: 0
   _preventDespawnOnDisconnect: 0
   _defaultDespawnType: 0
-  _initializedTimestamp: 0
+  _initializedTimestamp: -8584083428157151211
   _localLevelOfDetailCalculationType: 0
   _useLevelOfDetail: 0
   _useRootLevelOfDetail: 1
@@ -165,15 +171,15 @@ MonoBehaviour:
   _spectatorInterpolation: 2
   _enableTeleport: 0
   _teleportThreshold: 1
-  <PrefabId>k__BackingField: 65535
+  <PrefabId>k__BackingField: 12
   <SpawnableCollectionId>k__BackingField: 0
   <AssetPathHash>k__BackingField: 17896440817638413460
   SceneId: 0
   SerializedTransformProperties:
-    Position: {x: 0, y: 0, z: 0}
-    Rotation: {x: 0, y: 0, z: 0, w: 0}
-    Scale: {x: 0, y: 0, z: 0}
-    IsValid: 0
+    Position: {x: 6.1229997, y: -0.0923934, z: 6.5838757}
+    Rotation: {x: -0.7071068, y: -0, z: -0, w: 0.7071067}
+    Scale: {x: 7, y: 7, z: 7}
+    IsValid: 1
 --- !u!1 &5806404730016698089
 GameObject:
   m_ObjectHideFlags: 0

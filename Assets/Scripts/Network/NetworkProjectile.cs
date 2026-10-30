@@ -18,14 +18,44 @@ using UnityEngine;
 [DisallowMultipleComponent]
 public class NetworkProjectile : TickNetworkBehaviour
 {
+    public enum ProjectileMotionState : byte
+    {
+        Free,
+        Held,
+        Thrown
+    }
+
+    public struct ProjectilePredictionState
+    {
+        public ProjectileMotionState Motion;
+        public uint Sequence;
+        public NetworkObject Holder;
+        public NetworkObject Thrower;
+        public uint IgnoreCollisionSteps;
+    }
+
+    [FishNet.CodeGenerating.CustomComparer]
+    public static bool ComparePredictionStates(ProjectilePredictionState a, ProjectilePredictionState b)
+    {
+        return a.Motion == b.Motion && a.Sequence == b.Sequence
+            && a.Holder == b.Holder && a.Thrower == b.Thrower
+            && a.IgnoreCollisionSteps == b.IgnoreCollisionSteps;
+    }
+
     public struct ProjectileReplicateData : IReplicateData
     {
+        public ProjectilePredictionState State;
+        public bool HasTransition;
+        public bool HasHeldPose;
+        public Vector3 Position;
+        public Quaternion Rotation;
         /// <summary>One-shot velocity change applied on the throw tick.</summary>
         public Vector3 ThrowVelocity;
         private uint _tick;
 
         public void Dispose()
         {
+            State = default;
             ThrowVelocity = Vector3.zero;
         }
 
@@ -36,12 +66,20 @@ public class NetworkProjectile : TickNetworkBehaviour
     public struct ProjectileReconcileData : IReconcileData
     {
         public PredictionRigidbody Rigidbody;
-        public bool IsThrown;
+        public ProjectilePredictionState State;
         private uint _tick;
 
         public void Dispose() { }
         public uint GetTick() => _tick;
         public void SetTick(uint value) => _tick = value;
+    }
+
+    private struct PredictionSample
+    {
+        public bool Valid;
+        public uint Tick;
+        public Vector3 Position;
+        public Vector3 Velocity;
     }
 
     [Header("Synchronization")]
@@ -50,8 +88,17 @@ public class NetworkProjectile : TickNetworkBehaviour
 
     [Header("Presentation")]
     [SerializeField] private Transform _graphicalObject;
+
+    [Header("Prediction Smoothing")]
+    [Tooltip("Position damping time in seconds, not a fixed delay. Larger values soften corrections but increase visual lag.")]
+    [SerializeField, Min(0.01f)] private float _positionSmoothTime = 0.12f;
+    [Tooltip("Quaternion damping time in seconds. Larger values soften rotation changes but increase angular lag.")]
+    [SerializeField, Min(0.01f)] private float _rotationSmoothTime = 0.12f;
+    [Tooltip("Snap and reset damping when the physics root moves this many world units between rendered frames. 0 disables snapping. This is not a visual-error limit.")]
+    [SerializeField, Min(0f)] private float _teleportDistance;
+
+    [Header("RPC Presentation")]
     [SerializeField, Range(1, 8)] private byte _interpolationTicks = 2;
-    [SerializeField] private AdaptiveInterpolationType _adaptiveInterpolation = AdaptiveInterpolationType.Off;
 
     [Header("Holding")]
     [SerializeField] private Vector3 _localHoldPosition = new(0.55f, 1.1f, 0.75f);
@@ -82,7 +129,10 @@ public class NetworkProjectile : TickNetworkBehaviour
 
     private Rigidbody _rb;
     private Collider[] _colliders;
-    private ProjectileReplicateData _lastReplicateData;
+    private ProjectilePredictionState _predictionState;
+    private ProjectileReplicateData _pendingPredictionData;
+    private uint _nextPredictionSequence;
+    private NetworkObject _ignoredPredictionThrower;
     private Vector3 _throwVelocity;
     private ForceMode _rpcThrowForceMode;
     private NetworkObject _thrower;
@@ -96,6 +146,7 @@ public class NetworkProjectile : TickNetworkBehaviour
     private Vector3 _lastRootPosition;
     private Vector3 _lastViewPosition;
     private bool _hasSmoothingPositionSample;
+    private bool _presentationReady;
     private TickSmootherController _smoother;
     private bool _smoothingActive;
     private bool _presentationHeld;
@@ -104,10 +155,24 @@ public class NetworkProjectile : TickNetworkBehaviour
     private Quaternion _viewLocalRotation;
     private Vector3 _viewLocalScale;
     private Pose? _releaseViewPose;
+    private Pose? _heldViewPose;
+    private Vector3 _viewPositionVelocity;
+    private Vector4 _viewRotationVelocity;
+    private Vector3 _lastSmoothingRootPosition;
     private Pose _releaseLocalPose;
     private float _releaseBlendRemaining;
     private RigidbodyPauser _rpcReplayPauser;
     private PredictionManager _rpcReplayManager;
+    private PredictionManager _predictionDiagnosticsManager;
+    private PredictionSample[] _predictionSamples;
+    private Vector3 _beforeReplayPosition;
+    private Vector3 _beforeReplayVelocity;
+    private bool _measuringReplay;
+    private bool _receivedReconcile;
+    private float _maxHistoricalPositionError;
+    private float _maxHistoricalVelocityError;
+    private float _maxReplayPositionCorrection;
+    private float _maxReplayVelocityCorrection;
 
     public bool IsHeld => _holder.Value != null;
     public bool IsThrown => _isThrown;
@@ -172,8 +237,10 @@ public class NetworkProjectile : TickNetworkBehaviour
         UnityEditor.EditorApplication.delayCall -= ValidateNetworkConfiguration;
 #endif
         _holder.OnChange -= OnHolderChanged;
+        SetPredictionCollisionIgnore(null);
+        StopPredictionDiagnostics();
         StopRpcReplayIsolation();
-        DisposeSmoother();
+        StopPresentation();
     }
 
     public override void OnStartNetwork()
@@ -187,11 +254,27 @@ public class NetworkProjectile : TickNetworkBehaviour
 
         _rpcUsesUnityPhysics = !_usePrediction && TimeManager.PhysicsMode == PhysicsMode.Unity;
         SetTickCallbacks(TickCallback.Tick | TickCallback.PostTick);
-        ApplyHolderState(IsHeld);
+        if (_usePrediction)
+        {
+            ApplyPredictionBodyState();
+            ApplyPresentationState(_predictionState.Motion == ProjectileMotionState.Held);
+        }
+        else
+        {
+            ApplyHolderState(IsHeld);
+        }
     }
 
     public override void OnStartClient()
     {
+        if (_usePrediction)
+        {
+            _predictionDiagnosticsManager = PredictionManager;
+            _predictionDiagnosticsManager.OnPreReconcile += BeginPredictionReconcile;
+            _predictionDiagnosticsManager.OnPostReconcile += EndPredictionReconcile;
+            _predictionDiagnosticsManager.OnPostReplicateReplay += RecordPredictionReplay;
+        }
+
         if (!_usePrediction && !_rpcUsesUnityPhysics)
         {
             _rpcReplayPauser = new RigidbodyPauser();
@@ -207,7 +290,11 @@ public class NetworkProjectile : TickNetworkBehaviour
             return;
         }
 
-        if (!_rpcUsesUnityPhysics)
+        if (_usePrediction)
+        {
+            _presentationReady = true;
+        }
+        else if (!_rpcUsesUnityPhysics)
         {
             InitializationSettings settings = new()
             {
@@ -222,8 +309,7 @@ public class NetworkProjectile : TickNetworkBehaviour
                 SmoothedProperties = TransformPropertiesFlag.Position | TransformPropertiesFlag.Rotation
             };
             MovementSettings spectator = movement;
-            spectator.AdaptiveInterpolationValue = _usePrediction
-                ? _adaptiveInterpolation : AdaptiveInterpolationType.Off;
+            spectator.AdaptiveInterpolationValue = AdaptiveInterpolationType.Off;
             _smoother = new TickSmootherController();
             _smoother.Initialize(settings, movement, spectator);
         }
@@ -232,13 +318,24 @@ public class NetworkProjectile : TickNetworkBehaviour
 
     public override void OnStopClient()
     {
+        StopPredictionDiagnostics();
         StopRpcReplayIsolation();
-        DisposeSmoother();
+        StopPresentation();
     }
 
     public override void OnStopNetwork()
     {
+        if (_usePrediction)
+            StopPresentation();
         _throwVelocity = Vector3.zero;
+        SetPredictionCollisionIgnore(null);
+        _predictionState = default;
+        _pendingPredictionData = default;
+        _nextPredictionSequence = 0;
+        if (_usePrediction)
+            _prediction.ClearPendingForces();
+        _isThrown = false;
+        _hasHit = false;
     }
 
     private void PauseRpcBody(uint clientTick, uint serverTick)
@@ -263,23 +360,112 @@ public class NetworkProjectile : TickNetworkBehaviour
         _rpcReplayPauser = null;
     }
 
-    private void DisposeSmoother()
+    private void StopPredictionDiagnostics()
     {
+        if (_predictionDiagnosticsManager != null)
+        {
+            _predictionDiagnosticsManager.OnPreReconcile -= BeginPredictionReconcile;
+            _predictionDiagnosticsManager.OnPostReconcile -= EndPredictionReconcile;
+            _predictionDiagnosticsManager.OnPostReplicateReplay -= RecordPredictionReplay;
+            _predictionDiagnosticsManager = null;
+        }
+        _predictionSamples = null;
+        _measuringReplay = false;
+        _receivedReconcile = false;
+    }
+
+    private void RecordPredictionSample(uint tick)
+    {
+        if (!_enableSmoothingLogs)
+            return;
+        _predictionSamples ??= new PredictionSample[256];
+        _predictionSamples[tick % (uint)_predictionSamples.Length] = new PredictionSample
+        {
+            Valid = true,
+            Tick = tick,
+            Position = transform.position,
+            Velocity = _rb.velocity
+        };
+    }
+
+    private void BeginPredictionReconcile(uint clientTick, uint serverTick)
+    {
+        _receivedReconcile = false;
+        _measuringReplay = _enableSmoothingLogs;
+        if (!_measuringReplay)
+            return;
+        _beforeReplayPosition = transform.position;
+        _beforeReplayVelocity = _rb.velocity;
+    }
+
+    private void RecordPredictionReplay(uint clientTick, uint serverTick)
+    {
+        if (_receivedReconcile)
+            RecordPredictionSample(clientTick);
+    }
+
+    private void EndPredictionReconcile(uint clientTick, uint serverTick)
+    {
+        if (_measuringReplay && _receivedReconcile)
+        {
+            _maxReplayPositionCorrection = Mathf.Max(_maxReplayPositionCorrection,
+                Vector3.Distance(_beforeReplayPosition, transform.position));
+            _maxReplayVelocityCorrection = Mathf.Max(_maxReplayVelocityCorrection,
+                Vector3.Distance(_beforeReplayVelocity, _rb.velocity));
+        }
+        _measuringReplay = false;
+        _receivedReconcile = false;
+    }
+
+    private void MeasureHistoricalCorrection()
+    {
+        if (!_enableSmoothingLogs || _predictionSamples == null)
+            return;
+        uint tick = PredictionManager.ClientStateTick;
+        PredictionSample sample = _predictionSamples[tick % (uint)_predictionSamples.Length];
+        if (!sample.Valid || sample.Tick != tick)
+            return;
+        _maxHistoricalPositionError = Mathf.Max(_maxHistoricalPositionError,
+            Vector3.Distance(sample.Position, transform.position));
+        _maxHistoricalVelocityError = Mathf.Max(_maxHistoricalVelocityError,
+            Vector3.Distance(sample.Velocity, _rb.velocity));
+    }
+
+    private void StopPresentation()
+    {
+        _presentationReady = false;
         StopFlightSmoothing();
         _smoother?.OnDestroy();
         _smoother = null;
         _releaseViewPose = null;
+        _heldViewPose = null;
         _releaseBlendRemaining = 0f;
         RestoreViewTransform();
     }
 
+    private void OnDisable()
+    {
+        if (!_usePrediction)
+            return;
+        StopFlightSmoothing();
+        _releaseViewPose = null;
+        _heldViewPose = null;
+    }
+
     private void StopFlightSmoothing()
     {
-        if (!_smoothingActive)
+        if (!_usePrediction)
+        {
+            if (_smoothingActive)
+                _smoother.StopSmoother();
+            _smoothingActive = false;
             return;
+        }
 
-        _smoother.StopSmoother();
         _smoothingActive = false;
+        _viewPositionVelocity = Vector3.zero;
+        _viewRotationVelocity = Vector4.zero;
+        RestoreViewTransform();
     }
 
     private void RestoreViewTransform()
@@ -287,6 +473,8 @@ public class NetworkProjectile : TickNetworkBehaviour
         if (_graphicalObject == null || _graphicalObject == transform)
             return;
 
+        if (_usePrediction && _graphicalObject.parent != transform)
+            _graphicalObject.SetParent(transform, false);
         _graphicalObject.localPosition = _viewLocalPosition;
         _graphicalObject.localRotation = _viewLocalRotation;
         _graphicalObject.localScale = _viewLocalScale;
@@ -294,7 +482,7 @@ public class NetworkProjectile : TickNetworkBehaviour
 
     private void Update()
     {
-        if ((IsServerStarted || !_usePrediction) && _thrower != null
+        if (!_usePrediction && _thrower != null
             && Time.time >= _ignoreThrowerUntil)
         {
             RestoreThrowerCollisions();
@@ -332,9 +520,12 @@ public class NetworkProjectile : TickNetworkBehaviour
 
     private void LateUpdate()
     {
+        if (_usePrediction && IsSpawned)
+            ApplyPresentationState(_predictionState.Motion == ProjectileMotionState.Held);
+
         if (_presentationHeld)
         {
-            NetworkObject holder = _holder.Value;
+            NetworkObject holder = _usePrediction && IsSpawned ? _predictionState.Holder : _holder.Value;
             if (_graphicalObject != null && _graphicalObject != transform
                 && holder != null && holder.IsSpawned)
             {
@@ -343,15 +534,16 @@ public class NetworkProjectile : TickNetworkBehaviour
                 _graphicalObject.SetPositionAndRotation(
                     GetHoldPosition(holder, true) + rotation * offset,
                     rotation * _viewLocalRotation);
+                _heldViewPose = new Pose(_graphicalObject.position, _graphicalObject.rotation);
             }
         }
+        else if (_presentationReady)
+            UpdateFlightSmoothing(Time.deltaTime);
         else if (_smoother != null && !_smoothingActive)
         {
-            // Start after the release pose/RPC has been applied, never from the old held pose.
             RestoreViewTransform();
             Vector3 worldScale = _graphicalObject.lossyScale;
             _smoother.StartSmoother();
-            // FishNet 4.7's detach restores local scale rather than world scale.
             _graphicalObject.localScale = worldScale;
             if (_releaseViewPose.HasValue)
             {
@@ -394,21 +586,78 @@ public class NetworkProjectile : TickNetworkBehaviour
         _releaseBlendRemaining = Mathf.Max(0f, _releaseBlendRemaining - Time.deltaTime);
     }
 
+    private void UpdateFlightSmoothing(float deltaTime)
+    {
+        if (!_presentationReady || _presentationHeld || _graphicalObject == null)
+            return;
+
+        Vector3 targetPosition = transform.TransformPoint(_viewLocalPosition);
+        Quaternion targetRotation = transform.rotation * _viewLocalRotation;
+        if (!_smoothingActive)
+        {
+            RestoreViewTransform();
+            _graphicalObject.SetParent(null, true);
+            Pose pose = _releaseViewPose ?? new Pose(targetPosition, targetRotation);
+            _graphicalObject.SetPositionAndRotation(pose.position, pose.rotation);
+            _releaseViewPose = null;
+            _viewPositionVelocity = Vector3.zero;
+            _viewRotationVelocity = Vector4.zero;
+            _lastSmoothingRootPosition = transform.position;
+            _smoothingActive = true;
+            return;
+        }
+
+        if (deltaTime <= 0f)
+            return;
+
+        bool teleport = _teleportDistance > 0f
+            && (transform.position - _lastSmoothingRootPosition).sqrMagnitude
+                > _teleportDistance * _teleportDistance;
+        _lastSmoothingRootPosition = transform.position;
+        if (teleport)
+        {
+            _graphicalObject.SetPositionAndRotation(targetPosition, targetRotation);
+            _viewPositionVelocity = Vector3.zero;
+            _viewRotationVelocity = Vector4.zero;
+            return;
+        }
+
+        Vector3 position = Vector3.SmoothDamp(_graphicalObject.position, targetPosition,
+            ref _viewPositionVelocity, Mathf.Max(0.01f, _positionSmoothTime), Mathf.Infinity, deltaTime);
+        Quaternion current = _graphicalObject.rotation;
+        if (Quaternion.Dot(current, targetRotation) < 0f)
+            targetRotation = new Quaternion(-targetRotation.x, -targetRotation.y, -targetRotation.z, -targetRotation.w);
+
+        float smoothTime = Mathf.Max(0.01f, _rotationSmoothTime);
+        Vector4 rotation = new(
+            Mathf.SmoothDamp(current.x, targetRotation.x, ref _viewRotationVelocity.x, smoothTime, Mathf.Infinity, deltaTime),
+            Mathf.SmoothDamp(current.y, targetRotation.y, ref _viewRotationVelocity.y, smoothTime, Mathf.Infinity, deltaTime),
+            Mathf.SmoothDamp(current.z, targetRotation.z, ref _viewRotationVelocity.z, smoothTime, Mathf.Infinity, deltaTime),
+            Mathf.SmoothDamp(current.w, targetRotation.w, ref _viewRotationVelocity.w, smoothTime, Mathf.Infinity, deltaTime));
+        float magnitude = rotation.magnitude;
+        rotation /= magnitude;
+        // Keep the derivative tangent to the unit quaternion after normalization.
+        _viewRotationVelocity = (_viewRotationVelocity
+            - rotation * Vector4.Dot(_viewRotationVelocity, rotation)) / magnitude;
+        _graphicalObject.SetPositionAndRotation(position,
+            new Quaternion(rotation.x, rotation.y, rotation.z, rotation.w));
+    }
+
     private void LogSmoothingStart()
     {
         if (!_enableSmoothingLogs)
             return;
 
         Transform view = _graphicalObject;
-        bool smootherCreated = _smoother != null;
         bool pauserCreated = NetworkObject.RigidbodyPauser != null;
         Debug.Log(
             $"[GrenadeSmoothing][Start] SyncMode={(_usePrediction ? "Prediction" : "RPC")}, " +
             $"Server={IsServerStarted}, Client={IsClientStarted}, " +
             $"Prediction={NetworkObject.EnablePrediction}, StateForwarding={NetworkObject.EnableStateForwarding}, " +
-            $"Smoother={smootherCreated}, Pauser={pauserCreated}, View={(view != null ? view.name : "null")}, " +
+            $"ScriptSmoothing={_presentationReady}, Smoother={_smoother != null}, Pauser={pauserCreated}, View={(view != null ? view.name : "null")}, " +
             $"RpcReplayIsolation={_rpcReplayPauser != null}, " +
-            $"Interpolation={_interpolationTicks}, Adaptive={(_usePrediction ? _adaptiveInterpolation : AdaptiveInterpolationType.Off)}, " +
+            $"PositionSmoothTime={_positionSmoothTime:F3}, RotationSmoothTime={_rotationSmoothTime:F3}, TeleportDistance={_teleportDistance:F2}, " +
+            $"RpcInterpolation={_interpolationTicks}, " +
             $"PhysicsMode={TimeManager.PhysicsMode}, RigidbodyInterpolation={_rb.interpolation}, " +
             $"TickRate={(TimeManager != null ? TimeManager.TickRate : 0)}, " +
             $"TickDelta={(TimeManager != null ? TimeManager.TickDelta : 0d):F4}, " +
@@ -439,20 +688,25 @@ public class NetworkProjectile : TickNetworkBehaviour
             return;
 
         _nextSmoothingLogTime = Time.unscaledTime + _smoothingLogInterval;
-        bool smootherCreated = _smoother != null;
         bool pauserCreated = NetworkObject.RigidbodyPauser != null;
         bool paused = pauserCreated && NetworkObject.RigidbodyPauser.Paused;
         Debug.Log(
             $"[GrenadeSmoothing][Sample] Owner={IsOwner}, Held={IsHeld}, Thrown={_isThrown}, " +
-            $"Smoother={smootherCreated}, SmoothingActive={_smoothingActive}, Reconciling={NetworkObject.IsObjectReconciling}, " +
+            $"ScriptSmoothing={_presentationReady}, Smoother={_smoother != null}, SmoothingActive={_smoothingActive}, Reconciling={NetworkObject.IsObjectReconciling}, " +
             $"Pauser={pauserCreated}, Paused={paused}, Kinematic={_rb.isKinematic}, " +
             $"RootMaxStep={_maxRootFrameStep:F4}, ViewMaxStep={_maxViewFrameStep:F4}, " +
             $"RootViewOffset={Vector3.Distance(rootPosition, viewPosition):F4}, " +
+            $"HistoryPositionError={_maxHistoricalPositionError:F4}, HistoryVelocityError={_maxHistoricalVelocityError:F4}, " +
+            $"ReplayPositionCorrection={_maxReplayPositionCorrection:F4}, ReplayVelocityCorrection={_maxReplayVelocityCorrection:F4}, " +
             $"ViewParent={(view != null && view.parent != null ? view.parent.name : "null")}",
             this);
 
         _maxRootFrameStep = 0f;
         _maxViewFrameStep = 0f;
+        _maxHistoricalPositionError = 0f;
+        _maxHistoricalVelocityError = 0f;
+        _maxReplayPositionCorrection = 0f;
+        _maxReplayVelocityCorrection = 0f;
     }
 
     protected override void TimeManager_OnTick()
@@ -464,20 +718,19 @@ public class NetworkProjectile : TickNetworkBehaviour
             return;
         }
 
-        ProjectileReplicateData rd = new()
-        {
-            ThrowVelocity = _throwVelocity
-        };
-        _throwVelocity = Vector3.zero;
-        PerformReplicate(rd);
+        PerformReplicate(IsServerStarted ? BuildPredictionData() : default);
     }
 
     protected override void TimeManager_OnPostTick()
     {
-        if (_presentationHeld && !_rpcUsesUnityPhysics)
+        if (!_usePrediction && _presentationHeld && !_rpcUsesUnityPhysics)
             UpdateHeldTransform();
         if (_usePrediction)
+        {
+            if (IsClientStarted)
+                RecordPredictionSample(TimeManager.LocalTick);
             CreateReconcile();
+        }
     }
 
     [Replicate]
@@ -486,29 +739,37 @@ public class NetworkProjectile : TickNetworkBehaviour
         ReplicateState state = ReplicateState.Invalid,
         Channel channel = Channel.Unreliable)
     {
-        if (!_usePrediction || IsHeld)
+        if (!_usePrediction)
             return;
 
-        if (!IsServerStarted && !IsOwner)
+        bool created = state.ContainsCreated();
+        if (created && rd.HasTransition
+            && unchecked((int)(rd.State.Sequence - _predictionState.Sequence)) > 0)
         {
-            if (state.ContainsTicked())
+            _predictionState = rd.State;
+            _isThrown = _predictionState.Motion == ProjectileMotionState.Thrown;
+            _hasHit = false;
+            ApplyPredictionBodyState();
+            SetPredictionPose(rd.Position, rd.Rotation);
+            if (_predictionState.Motion != ProjectileMotionState.Held)
             {
-                _lastReplicateData.Dispose();
-                _lastReplicateData = rd;
-            }
-            else if (state.IsFuture() && rd.GetTick() - _lastReplicateData.GetTick() <= 1)
-            {
-                rd.Dispose();
-                rd = _lastReplicateData;
-                // A throw is a one-time input and must never be predicted twice.
-                rd.ThrowVelocity = Vector3.zero;
+                _prediction.ClearVelocities();
+                _prediction.AddForce(rd.ThrowVelocity, ForceMode.VelocityChange);
             }
         }
 
-        if (rd.ThrowVelocity.sqrMagnitude > 0.001f)
+        if (_predictionState.Motion == ProjectileMotionState.Held)
         {
-            _prediction.AddForce(rd.ThrowVelocity, ForceMode.VelocityChange);
+            if (created && rd.HasHeldPose && rd.State.Sequence == _predictionState.Sequence)
+                SetPredictionPose(rd.Position, rd.Rotation);
+            SetPredictionCollisionIgnore(null);
+            return;
         }
+
+        // The remaining step count is reconciled, so expiry rewinds with physics.
+        SetPredictionCollisionIgnore(_predictionState.IgnoreCollisionSteps > 0 ? _predictionState.Thrower : null);
+        if (_predictionState.IgnoreCollisionSteps > 0)
+            _predictionState.IgnoreCollisionSteps--;
 
         _prediction.AddForce(new Vector3(0f, -_gravity, 0f), ForceMode.Acceleration);
         _counterForce = -_rb.velocity * _airFrictionRate;
@@ -527,7 +788,7 @@ public class NetworkProjectile : TickNetworkBehaviour
         ProjectileReconcileData rd = new()
         {
             Rigidbody = _prediction,
-            IsThrown = _isThrown
+            State = _predictionState
         };
         PerformReconcile(rd);
     }
@@ -538,8 +799,83 @@ public class NetworkProjectile : TickNetworkBehaviour
         if (!_usePrediction)
             return;
 
-        _isThrown = rd.IsThrown;
+        _predictionState = rd.State;
+        _isThrown = _predictionState.Motion == ProjectileMotionState.Thrown;
         _prediction.Reconcile(rd.Rigidbody);
+        ApplyPredictionBodyState();
+        SetPredictionCollisionIgnore(_predictionState.IgnoreCollisionSteps > 0 ? _predictionState.Thrower : null);
+        _receivedReconcile = true;
+        MeasureHistoricalCorrection();
+    }
+
+    private void QueuePredictionTransition(ProjectileMotionState motion, NetworkObject actor, Vector3 velocity)
+    {
+        _pendingPredictionData = new ProjectileReplicateData
+        {
+            HasTransition = true,
+            HasHeldPose = motion == ProjectileMotionState.Held,
+            State = new ProjectilePredictionState
+            {
+                Motion = motion,
+                Sequence = ++_nextPredictionSequence,
+                Holder = motion == ProjectileMotionState.Held ? actor : null,
+                Thrower = motion == ProjectileMotionState.Held ? null : actor,
+                IgnoreCollisionSteps = motion == ProjectileMotionState.Held
+                    ? 0 : (uint)Mathf.CeilToInt(_ignoreThrowerDuration / (float)TimeManager.TickDelta)
+            },
+            Position = GetHoldPosition(actor),
+            Rotation = GetHoldRotation(actor),
+            ThrowVelocity = velocity
+        };
+    }
+
+    private ProjectileReplicateData BuildPredictionData()
+    {
+        ProjectileReplicateData rd = _pendingPredictionData;
+        _pendingPredictionData = default;
+        if (!rd.HasTransition)
+        {
+            if (_predictionState.Motion != ProjectileMotionState.Held)
+                return default;
+            rd.State = _predictionState;
+            rd.HasHeldPose = true;
+        }
+
+        NetworkObject actor = rd.State.Motion == ProjectileMotionState.Held ? rd.State.Holder : rd.State.Thrower;
+        if (actor != null)
+        {
+            rd.Position = GetHoldPosition(actor);
+            rd.Rotation = GetHoldRotation(actor);
+        }
+        if (rd.State.Motion == ProjectileMotionState.Thrown)
+            rd.Position += rd.ThrowVelocity.normalized * _throwSpawnOffset;
+        return rd;
+    }
+
+    private void ApplyPredictionBodyState()
+    {
+        bool held = _predictionState.Motion == ProjectileMotionState.Held;
+        if (held && !_rb.isKinematic)
+            _prediction.ClearVelocities();
+        _rb.isKinematic = held;
+        foreach (Collider item in _colliders)
+            item.enabled = !held;
+    }
+
+    private void SetPredictionPose(Vector3 position, Quaternion rotation)
+    {
+        transform.SetPositionAndRotation(position, rotation);
+        _rb.position = position;
+        _rb.rotation = rotation;
+    }
+
+    private void SetPredictionCollisionIgnore(NetworkObject thrower)
+    {
+        if (_ignoredPredictionThrower == thrower)
+            return;
+        SetCollisionIgnored(_ignoredPredictionThrower, false);
+        _ignoredPredictionThrower = thrower;
+        SetCollisionIgnored(_ignoredPredictionThrower, true);
     }
 
     /// <summary>Server-side pickup entry for weapons, AI, or interaction systems.</summary>
@@ -547,6 +883,13 @@ public class NetworkProjectile : TickNetworkBehaviour
     {
         if (!IsServerStarted || !CanHold(holder))
             return;
+
+        if (_usePrediction)
+        {
+            QueuePredictionTransition(ProjectileMotionState.Held, holder, Vector3.zero);
+            _holder.Value = holder;
+            return;
+        }
 
         RestoreThrowerCollisions();
         _holder.Value = holder;
@@ -567,6 +910,13 @@ public class NetworkProjectile : TickNetworkBehaviour
             direction = holder.transform.forward;
 
         direction.Normalize();
+        if (_usePrediction)
+        {
+            QueuePredictionTransition(ProjectileMotionState.Thrown, holder, direction * _throwSpeed);
+            _holder.Value = null;
+            return;
+        }
+
         Vector3 throwPosition = GetHoldPosition(holder) + direction * _throwSpawnOffset;
         Quaternion throwRotation = GetHoldRotation(holder);
         Vector3 throwVelocity = direction * _throwSpeed;
@@ -576,17 +926,8 @@ public class NetworkProjectile : TickNetworkBehaviour
         _isThrown = true;
         _hasHit = false;
 
-        if (_usePrediction)
-        {
-            SetLocalPose(throwPosition, throwRotation);
-            _throwVelocity = throwVelocity;
-            IgnoreThrowerCollisions();
-        }
-        else
-        {
-            ThrowObservers(throwPosition, throwRotation, throwVelocity,
-                ForceMode.VelocityChange, holder);
-        }
+        ThrowObservers(throwPosition, throwRotation, throwVelocity,
+            ForceMode.VelocityChange, holder);
     }
 
     /// <summary>Releases the projectile without throwing velocity or hit activation.</summary>
@@ -596,6 +937,13 @@ public class NetworkProjectile : TickNetworkBehaviour
             return;
 
         NetworkObject holder = _holder.Value;
+        if (_usePrediction)
+        {
+            QueuePredictionTransition(ProjectileMotionState.Free, holder, Vector3.zero);
+            _holder.Value = null;
+            return;
+        }
+
         RestoreThrowerCollisions();
         _thrower = holder;
         _holder.Value = null;
@@ -605,15 +953,7 @@ public class NetworkProjectile : TickNetworkBehaviour
 
         Vector3 dropPosition = GetHoldPosition(holder);
         Quaternion dropRotation = GetHoldRotation(holder);
-        if (_usePrediction)
-        {
-            SetLocalPose(dropPosition, dropRotation);
-            IgnoreThrowerCollisions();
-        }
-        else
-        {
-            DropObservers(dropPosition, dropRotation, holder);
-        }
+        DropObservers(dropPosition, dropRotation, holder);
     }
 
     [ObserversRpc(RunLocally = true)]
@@ -714,7 +1054,25 @@ public class NetworkProjectile : TickNetworkBehaviour
 
     private void OnHolderChanged(NetworkObject previous, NetworkObject next, bool asServer)
     {
-        ApplyHolderState(next != null);
+        if (!_usePrediction)
+            ApplyHolderState(next != null);
+    }
+
+    private void ApplyPresentationState(bool held)
+    {
+        if (_presentationHeld != held)
+        {
+            if (!held && _graphicalObject != null && (_presentationReady || _smoother != null || _rpcUsesUnityPhysics))
+                _releaseViewPose = _usePrediction && _heldViewPose.HasValue
+                    ? _heldViewPose.Value : new Pose(_graphicalObject.position, _graphicalObject.rotation);
+            else
+                _releaseViewPose = null;
+            _heldViewPose = null;
+            _releaseBlendRemaining = 0f;
+            StopFlightSmoothing();
+            RestoreViewTransform();
+            _presentationHeld = held;
+        }
     }
 
     private void ApplyHolderState(bool held)
@@ -722,17 +1080,7 @@ public class NetworkProjectile : TickNetworkBehaviour
         if (_rb == null)
             return;
 
-        if (_presentationHeld != held)
-        {
-            if (!held && _graphicalObject != null && (_smoother != null || _rpcUsesUnityPhysics))
-                _releaseViewPose = new Pose(_graphicalObject.position, _graphicalObject.rotation);
-            else
-                _releaseViewPose = null;
-            _releaseBlendRemaining = 0f;
-            StopFlightSmoothing();
-            RestoreViewTransform();
-            _presentationHeld = held;
-        }
+        ApplyPresentationState(held);
         _rb.interpolation = !held && _rpcUsesUnityPhysics
             ? RigidbodyInterpolation.Interpolate : RigidbodyInterpolation.None;
         if (held)
@@ -819,10 +1167,15 @@ public class NetworkProjectile : TickNetworkBehaviour
 
     private void SetThrowerCollisionIgnored(bool ignore)
     {
-        if (_thrower == null)
+        SetCollisionIgnored(_thrower, ignore);
+    }
+
+    private void SetCollisionIgnored(NetworkObject thrower, bool ignore)
+    {
+        if (thrower == null)
             return;
 
-        Collider[] throwerColliders = _thrower.GetComponentsInChildren<Collider>(true);
+        Collider[] throwerColliders = thrower.GetComponentsInChildren<Collider>(true);
         foreach (Collider projectileCollider in _colliders)
         {
             foreach (Collider throwerCollider in throwerColliders)
@@ -837,7 +1190,8 @@ public class NetworkProjectile : TickNetworkBehaviour
 
         PlayerControllerPrediction target =
             collision.collider.GetComponentInParent<PlayerControllerPrediction>();
-        if (target == null || !target.IsSpawned || target.NetworkObject == _thrower)
+        NetworkObject ignoredThrower = _usePrediction ? _ignoredPredictionThrower : _thrower;
+        if (target == null || !target.IsSpawned || target.NetworkObject == ignoredThrower)
             return;
 
         Vector3 direction = target.transform.position - transform.position;
