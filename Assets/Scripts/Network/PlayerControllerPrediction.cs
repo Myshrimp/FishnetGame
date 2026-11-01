@@ -633,27 +633,35 @@ namespace FaceSlapper.Network.Prediction
                 return;
 
             AbilityExecutionContext context;
-            if (IsServerStarted)
-                context = AbilityExecutionContext.Server;
-            else if (IsOwner && state.ContainsTicked() && !state.ContainsReplayed())
-                context = AbilityExecutionContext.OwnerFirstExecution;
-            else if (state.ContainsReplayed())
+            if (state.ContainsReplayed())
                 context = AbilityExecutionContext.Replay;
+            else if (IsServerStarted)
+                context = AbilityExecutionContext.Server;
+            else if (IsOwner && state.ContainsTicked())
+                context = AbilityExecutionContext.OwnerFirstExecution;
             else
                 context = AbilityExecutionContext.Spectator;
 
             for (int i = 0; i < commands.Count; i++)
-                _abilities.TryActivate(commands.Get(i), context, this, ValidateAbilityExecution);
+                _abilities.TryActivate(commands.Get(i), context, this,
+                    command => ValidateAbilityExecution(command, context));
         }
 
-        private bool ValidateAbilityExecution(AbilityCommand command)
+        private bool ValidateAbilityExecution(AbilityCommand command, AbilityExecutionContext context)
         {
             if (command.Ability == AbilityId.Charge)
                 return true;
 
-            // Projectile world mutation is migrated in the next task. Until then this
-            // validates component availability while keeping simulation deterministic.
-            return _projectileController != null;
+            if (_projectileController == null)
+                return false;
+            if (context.RecordDecision)
+                return _projectileController.TryExecuteServerAbility(command);
+            if (context.TrackPrediction)
+                return _projectileController.CanExecuteAbility(command);
+
+            // Replay and spectators rebuild only the ability state. Server-owned world
+            // state was already changed once by the authoritative execution.
+            return true;
         }
 
         float IAbilityResource.Current => Stamina;

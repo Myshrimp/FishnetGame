@@ -113,29 +113,29 @@ Refresh stunned/carried external tags when those states change. Preserve gravity
 **Files:**
 - Modify: `Assets/Scripts/Network/PlayerProjectileController.cs`
 - Modify: `Assets/Scripts/Network/PlayerControllerPrediction.cs`
-- Create: `Assets/Tests/Editor/PlayerAbilityProjectileTests.cs`
+- Modify: `Assets/Tests/Editor/PlayerStunPredictionTests.cs`
 
 **Interfaces:**
 - Consumes: projectile-interact and projectile-throw commands emitted by the motor.
 - Produces: non-mutating client validation and server-only `TryExecuteInteraction` / `TryExecuteThrow` methods.
 
-- [ ] **Step 1: Add failing migration tests**
+- [x] **Step 1: Add failing migration tests**
 
 Prove client execution never changes `_heldObject`, server pickup/drop/throw mutates once, unavailable targets reject activation, and replay cannot repeat the world mutation.
 
-- [ ] **Step 2: Run the focused tests and verify current ServerRpc path fails expectations**
+- [x] **Step 2: Run the focused tests and verify current ServerRpc path fails expectations**
 
-- [ ] **Step 3: Remove input polling and ServerRpc activation from `PlayerProjectileController`**
+- [x] **Step 3: Remove input polling and ServerRpc activation from `PlayerProjectileController`**
 
 Move cooldown ownership to ability specs. Keep overlap validation, held-object SyncVar, and server cleanup.
 
-- [ ] **Step 4: Dispatch projectile commands from the motor's replicate executor**
+- [x] **Step 4: Dispatch projectile commands from the motor's replicate executor**
 
 Pass aim direction through `AbilityCommand`; only `IsServerStarted` may call mutation methods.
 
-- [ ] **Step 5: Run ability, motor, projectile prediction, and presentation tests**
+- [x] **Step 5: Run ability, motor, projectile prediction, and presentation tests**
 
-- [ ] **Step 6: Commit projectile migration**
+- [x] **Step 6: Commit projectile migration**
 
 ### Task 5: Whole-feature verification and documentation
 
@@ -147,15 +147,15 @@ Pass aim direction through `AbilityCommand`; only `IsServerStarted` may call mut
 - Consumes: all previous tasks.
 - Produces: verified milestone and operator-facing architecture notes.
 
-- [ ] **Step 1: Run the complete EditMode suite**
+- [x] **Step 1: Run the complete EditMode suite**
 
 Expect all `FaceSlapper.Projectile.Tests` tests to pass with zero failures.
 
-- [ ] **Step 2: Search for stale activation paths**
+- [x] **Step 2: Search for stale activation paths**
 
 Verify Q charge no longer uses `ChargePressed`, migrated projectile interaction has no `ServerRpc`, predicted cooldown does not use `Time.time`, and every replay-sensitive cue is guarded.
 
-- [ ] **Step 3: Inspect git diff for prefab or generated-file noise**
+- [x] **Step 3: Inspect git diff for prefab or generated-file noise**
 
 Only source, tests, metas, and design/plan documents should change.
 

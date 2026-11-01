@@ -124,6 +124,55 @@ public class PlayerStunPredictionTests
     }
 
     [Test]
+    public void ProjectileAbilityWithoutTargetIsRejectedByServerDecisionHistory()
+    {
+        object data = Activator.CreateInstance(_type.GetNestedType("ReplicateData"));
+        SetField(data, "Abilities", AbilityCommands("ProjectileInteract", 88));
+        ((IReplicateData)data).SetTick(2400);
+
+        Invoke("PerformReplicate___UL", data, ReplicateState.Ticked | ReplicateState.Created, Channel.Unreliable);
+
+        object abilities = GetField(_motor, "_abilities");
+        object snapshot = abilities.GetType().GetMethod("CaptureSnapshot", Flags).Invoke(abilities, null);
+        object decisions = GetField(snapshot, "Decisions");
+        bool rejected = (bool)decisions.GetType().GetMethod("WasRejected", Flags)
+            .Invoke(decisions, new object[] { (uint)88 });
+        Assert.That(rejected, Is.True, "Server accepted projectile interaction without an available target.");
+    }
+
+    [Test]
+    public void ProjectileWorldExecutionRefusesNonServerCaller()
+    {
+        SetProperty(_server, "Started", false);
+        object commands = AbilityCommands("ProjectileInteract", 89);
+        object command = commands.GetType().GetMethod("Get", Flags).Invoke(commands, new object[] { 0 });
+        MethodInfo execute = _interaction.GetType().GetMethod("TryExecuteServerAbility", Flags);
+        Assert.That(execute, Is.Not.Null, "Projectile controller does not expose the server-only ability boundary.");
+
+        bool accepted = (bool)execute.Invoke(_interaction, new[] { command });
+
+        Assert.That(accepted, Is.False, "Non-server caller crossed the projectile world-mutation boundary.");
+        SetProperty(_server, "Started", true);
+    }
+
+    [Test]
+    public void HostReplayDoesNotRecordAnotherProjectileDecision()
+    {
+        object data = Activator.CreateInstance(_type.GetNestedType("ReplicateData"));
+        SetField(data, "Abilities", AbilityCommands("ProjectileInteract", 90));
+        ((IReplicateData)data).SetTick(2401);
+
+        Invoke("PerformReplicate___UL", data, ReplicateState.Replayed | ReplicateState.Created, Channel.Unreliable);
+
+        object abilities = GetField(_motor, "_abilities");
+        object snapshot = abilities.GetType().GetMethod("CaptureSnapshot", Flags).Invoke(abilities, null);
+        object decisions = GetField(snapshot, "Decisions");
+        bool processed = (bool)decisions.GetType().GetMethod("HasProcessed", Flags)
+            .Invoke(decisions, new object[] { (uint)90 });
+        Assert.That(processed, Is.False, "Host replay was classified as a fresh server execution.");
+    }
+
+    [Test]
     public void ReconcileRestoresCountdownAndReplayReachesTheSamePosition()
     {
         Hit(0.5f);
@@ -277,6 +326,18 @@ public class PlayerStunPredictionTests
             _motor.transform.localPosition, _motor.transform.localRotation,
             GetField(_motor, "_verticalVelocity"), GetProperty(_motor, "Stamina"),
             GetField(GetField(_motor, "State"), "IsCharging"), remaining, knockback);
+    }
+
+    private object AbilityCommands(string abilityName, uint predictionId)
+    {
+        Type commandType = FindAbilityType("AbilityCommand");
+        object command = Activator.CreateInstance(commandType);
+        SetField(command, "Ability", Enum.Parse(FindAbilityType("AbilityId"), abilityName));
+        SetField(command, "Phase", Enum.Parse(FindAbilityType("AbilityInputPhase"), "Pressed"));
+        SetField(command, "PredictionId", predictionId);
+        object commands = Activator.CreateInstance(FindAbilityType("AbilityCommandBuffer"));
+        commands.GetType().GetMethod("TryAdd", Flags).Invoke(commands, new[] { command });
+        return commands;
     }
 
     private void Restore(object snapshot) => Invoke("PerformReconcile___UL", snapshot, Channel.Unreliable);

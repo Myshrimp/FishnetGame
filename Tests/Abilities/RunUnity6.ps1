@@ -20,11 +20,14 @@ foreach ($folder in @('FishNet', 'Scripts', 'Tests')) {
     Copy-Item -LiteralPath (Join-Path $projectRoot "Assets/$folder") -Destination (Join-Path $validationRoot 'Assets') -Recurse -Force
 }
 
-# Unity 6 renamed PhysicMaterial. The production project targets 2022.3, so omit only
-# the incompatible legacy test file from this auxiliary compiler/test pass.
+# Unity 6 renamed PhysicMaterial. Adapt only the disposable validation copy;
+# the production project and source tests remain on their declared 2022.3 API.
 $legacyTest = Join-Path $validationRoot 'Assets/Tests/Editor/NetworkProjectilePredictionTests.cs'
 if (Test-Path -LiteralPath $legacyTest) {
-    Remove-Item -LiteralPath $legacyTest -Force
+    $source = [IO.File]::ReadAllText($legacyTest)
+    $source = $source.Replace('PhysicMaterialCombine', 'PhysicsMaterialCombine')
+    $source = $source.Replace('PhysicMaterial', 'PhysicsMaterial')
+    [IO.File]::WriteAllText($legacyTest, $source, [Text.UTF8Encoding]::new($false))
 }
 
 $resultPath = Join-Path $validationRoot "$Label.xml"
@@ -32,9 +35,11 @@ $logPath = Join-Path $validationRoot "$Label.log"
 $arguments = @(
     '-batchmode', '-nographics', '-projectPath', $validationRoot,
     '-runTests', '-testPlatform', 'EditMode',
-    '-testFilter', $TestFilter,
     '-testResults', $resultPath, '-logFile', $logPath
 )
+if (![string]::IsNullOrWhiteSpace($TestFilter)) {
+    $arguments += @('-testFilter', $TestFilter)
+}
 $process = Start-Process -FilePath $UnityPath -ArgumentList $arguments -WindowStyle Hidden -PassThru
 $process.WaitForExit()
 if (!(Test-Path -LiteralPath $resultPath)) {

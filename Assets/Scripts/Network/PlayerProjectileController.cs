@@ -1,3 +1,4 @@
+using FaceSlapper.Abilities;
 using FishNet.Object;
 using FishNet.Object.Synchronizing;
 using UnityEngine;
@@ -15,12 +16,10 @@ namespace FaceSlapper.Network.Prediction
         [SerializeField] private Transform _holdAnchor;
         [SerializeField, Min(0.1f)] private float _pickupRadius = 2.5f;
         [SerializeField] private LayerMask _projectileLayers = ~0;
-        [SerializeField, Min(0.1f)] private float _interactionCooldown = 0.15f;
 
         private readonly SyncVar<NetworkObject> _heldObject = new();
         private readonly Collider[] _overlapResults = new Collider[32];
         private PlayerControllerPrediction _motor;
-        private float _nextInteractionTime;
 
         public Transform HoldAnchor => _holdAnchor;
         public NetworkObject HeldObject => _heldObject.Value;
@@ -35,21 +34,6 @@ namespace FaceSlapper.Network.Prediction
         {
             if (IsServerStarted)
                 ValidateHeldObject();
-
-            if (!IsOwner || !CanInteract())
-                return;
-
-            if (UnityEngine.Input.GetKeyDown(KeyCode.E))
-                RequestInteract();
-
-            if (HasProjectile && UnityEngine.Input.GetMouseButtonDown(0))
-                RequestThrow(GetAimDirection());
-        }
-
-        private Vector3 GetAimDirection()
-        {
-            UnityEngine.Camera playerCamera = UnityEngine.Camera.main;
-            return playerCamera != null ? playerCamera.transform.forward : transform.forward;
         }
 
         private bool CanInteract()
@@ -57,47 +41,83 @@ namespace FaceSlapper.Network.Prediction
             return _motor != null && !_motor.IsStunned && !_motor.IsCarried;
         }
 
-        [ServerRpc]
-        private void RequestInteract()
+        internal bool CanExecuteAbility(AbilityCommand command)
         {
-            if (!CanInteract() || Time.time < _nextInteractionTime)
-                return;
+            if (!CanInteract())
+                return false;
 
-            _nextInteractionTime = Time.time + _interactionCooldown;
+            switch (command.Ability)
+            {
+                case AbilityId.ProjectileInteract:
+                    return _heldObject.Value != null
+                        ? GetHeldProjectile() != null
+                        : FindNearestProjectile() != null;
+                case AbilityId.ProjectileThrow:
+                    return GetHeldProjectile() != null;
+                default:
+                    return false;
+            }
+        }
 
+        internal bool TryExecuteServerAbility(AbilityCommand command)
+        {
+            if (!IsServerStarted)
+                return false;
+
+            ValidateHeldObject();
+            if (!CanExecuteAbility(command))
+                return false;
+
+            switch (command.Ability)
+            {
+                case AbilityId.ProjectileInteract:
+                    return TryInteract();
+                case AbilityId.ProjectileThrow:
+                    return TryThrow(command.AimDirection);
+                default:
+                    return false;
+            }
+        }
+
+        private bool TryInteract()
+        {
             if (_heldObject.Value != null)
             {
                 DropHeldObject();
-                return;
+                return _heldObject.Value == null;
             }
 
             NetworkProjectile projectile = FindNearestProjectile();
             if (projectile == null)
-                return;
+                return false;
 
             projectile.Hold(NetworkObject);
             if (projectile.IsHeld && projectile.Holder == NetworkObject)
+            {
                 _heldObject.Value = projectile.NetworkObject;
+                return true;
+            }
+
+            return false;
         }
 
-        [ServerRpc]
-        private void RequestThrow(Vector3 direction)
+        private bool TryThrow(Vector3 direction)
         {
-            if (!CanInteract() || Time.time < _nextInteractionTime)
-                return;
-
-            _nextInteractionTime = Time.time + _interactionCooldown;
-
             NetworkProjectile projectile = GetHeldProjectile();
             if (projectile == null)
             {
                 _heldObject.Value = null;
-                return;
+                return false;
             }
 
             projectile.Throw(direction);
             if (!projectile.IsHeld)
+            {
                 _heldObject.Value = null;
+                return true;
+            }
+
+            return false;
         }
 
         private NetworkProjectile FindNearestProjectile()
