@@ -17,6 +17,7 @@ public static class AbilityRuntimeTests
         Check(nameof(ReplayRebuildsStateWithoutRepeatingCues), ReplayRebuildsStateWithoutRepeatingCues);
         Check(nameof(ReconcileConfirmsAndRejectsSkippedDecisions), ReconcileConfirmsAndRejectsSkippedDecisions);
         Check(nameof(DecisionHistorySurvivesPredictionIdWraparound), DecisionHistorySurvivesPredictionIdWraparound);
+        Check(nameof(PlayerRuntimeUsesTickCooldownAndCancelsChargeOnStatus), PlayerRuntimeUsesTickCooldownAndCancelsChargeOnStatus);
 
         Console.WriteLine($"Ability runtime tests: {_passed} passed, {_failed} failed");
         return _failed == 0 ? 0 : 1;
@@ -149,6 +150,30 @@ public static class AbilityRuntimeTests
         Assert(!history.WasRejected(uint.MaxValue), "accepted pre-wrap id became rejected");
         Assert(history.WasRejected(0u), "rejected wrapped id was lost");
         Assert(!history.WasRejected(1u), "accepted newest id became rejected");
+    }
+
+    private static void PlayerRuntimeUsesTickCooldownAndCancelsChargeOnStatus()
+    {
+        PlayerAbilityRuntime player = new PlayerAbilityRuntime(1f / 30f);
+        FakeResource resource = new FakeResource(50f);
+        player.AdvanceTick(false, false);
+        Assert(player.TryActivate(Command(AbilityId.ProjectileInteract, 200), AbilityExecutionContext.OwnerFirstExecution,
+            resource, _ => true), "player interact was rejected");
+
+        for (int step = 0; step < 4; step++)
+        {
+            player.AdvanceTick(false, false);
+            Assert(player.HasTag(GameplayTag.CooldownProjectileInteract), "0.15 second cooldown expired before five 30Hz steps");
+        }
+        player.AdvanceTick(false, false);
+        Assert(!player.HasTag(GameplayTag.CooldownProjectileInteract), "0.15 second cooldown outlived five 30Hz steps");
+
+        Assert(player.TryActivate(Command(AbilityId.Charge, 201), AbilityExecutionContext.OwnerFirstExecution,
+            resource, _ => true), "charge was rejected without status tags");
+        Assert(player.HasTag(GameplayTag.StateCharging), "charge did not activate");
+        player.SetStatus(true, false);
+        Assert(!player.HasTag(GameplayTag.StateCharging), "stun did not cancel charge immediately");
+        Assert(player.HasTag(GameplayTag.StateStunned), "stun was not exposed as an external gameplay tag");
     }
 
     private static PredictedAbilityRuntime Runtime() => new PredictedAbilityRuntime(new[]

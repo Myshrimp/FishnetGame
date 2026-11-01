@@ -101,6 +101,29 @@ public class PlayerStunPredictionTests
     }
 
     [Test]
+    public void ChargeAbilityCommandActivatesAndStunCancelsItImmediately()
+    {
+        Type commandType = FindAbilityType("AbilityCommand");
+        object command = Activator.CreateInstance(commandType);
+        SetField(command, "Ability", Enum.Parse(FindAbilityType("AbilityId"), "Charge"));
+        SetField(command, "Phase", Enum.Parse(FindAbilityType("AbilityInputPhase"), "Pressed"));
+        SetField(command, "PredictionId", (uint)77);
+        object commands = Activator.CreateInstance(FindAbilityType("AbilityCommandBuffer"));
+        commands.GetType().GetMethod("TryAdd", Flags).Invoke(commands, new[] { command });
+        object data = Activator.CreateInstance(_type.GetNestedType("ReplicateData"));
+        SetField(data, "Abilities", commands);
+        ((IReplicateData)data).SetTick(2400);
+
+        Invoke("PerformReplicate___UL", data, ReplicateState.Ticked | ReplicateState.Created, Channel.Unreliable);
+
+        Assert.That(GetField(GetField(_motor, "State"), "IsCharging"), Is.True,
+            "The charge command did not change predicted movement state.");
+        Hit(0.5f);
+        Assert.That(GetField(GetField(_motor, "State"), "IsCharging"), Is.False,
+            "Stun did not cancel the active charge tag immediately.");
+    }
+
+    [Test]
     public void ReconcileRestoresCountdownAndReplayReachesTheSamePosition()
     {
         Hit(0.5f);
@@ -277,6 +300,9 @@ public class PlayerStunPredictionTests
 
     private static Type FindType(string name) => AppDomain.CurrentDomain.GetAssemblies()
         .Select(a => a.GetType("FaceSlapper.Network.Prediction." + name)).First(t => t != null);
+
+    private static Type FindAbilityType(string name) => AppDomain.CurrentDomain.GetAssemblies()
+        .Select(a => a.GetType("FaceSlapper.Abilities." + name)).First(t => t != null);
 
     private GameObject CreateObject(string name)
     {

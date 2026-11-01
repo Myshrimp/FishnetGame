@@ -90,23 +90,23 @@ Use a 64-bit rejection window plus highest-processed watermark. Reconcile runtim
 - Consumes: `PredictedAbilityRuntime`, `AbilityCommandBuffer`, and `AbilitySystemSnapshot`.
 - Produces: Q/E/mouse command capture, ability snapshot reconciliation, stamina adapter, compatibility `State.IsCharging`, and public cue event.
 
-- [ ] **Step 1: Add failing motor integration tests**
+- [x] **Step 1: Add failing motor integration tests**
 
 Test charge activation, replay idempotence, stun cancellation, reconcile restoration, simultaneous buffered inputs, and no predicted stamina underflow.
 
-- [ ] **Step 2: Run focused motor tests and verify failure**
+- [x] **Step 2: Run focused motor tests and verify failure**
 
-- [ ] **Step 3: Add ability commands to `ReplicateData` and snapshots to `ReconcileData`**
+- [x] **Step 3: Add ability commands to `ReplicateData` and snapshots to `ReconcileData`**
 
 Allocate prediction ids while buffering edge inputs in `Update`. Advance the runtime once at the start of every replicate, process commands in order, and mirror the charging tag into `State.IsCharging`.
 
-- [ ] **Step 4: Implement `IAbilityResource` with existing stamina methods**
+- [x] **Step 4: Implement `IAbilityResource` with existing stamina methods**
 
 Refresh stunned/carried external tags when those states change. Preserve gravity, knockback, carry, and future-input behavior.
 
-- [ ] **Step 5: Run motor and runtime tests and verify they pass**
+- [x] **Step 5: Run motor and runtime tests and verify they pass**
 
-- [ ] **Step 6: Commit player integration**
+- [x] **Step 6: Commit player integration**
 
 ### Task 4: Migrate projectile interaction activations
 

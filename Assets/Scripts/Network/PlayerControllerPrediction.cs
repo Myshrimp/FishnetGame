@@ -1,4 +1,5 @@
 using System;
+using FaceSlapper.Abilities;
 using FishNet.Component.Prediction;
 using FishNet.Connection;
 using FishNet.Object.Prediction;
@@ -8,7 +9,7 @@ using UnityEngine;
 
 namespace FaceSlapper.Network.Prediction
 {
-    public class PlayerControllerPrediction : TickNetworkBehaviour
+    public class PlayerControllerPrediction : TickNetworkBehaviour, IAbilityResource
     {
         #region Types.
         /// <summary>
@@ -20,7 +21,6 @@ namespace FaceSlapper.Network.Prediction
             /// True to jump.
             /// </summary>
             public bool Jump;
-            public bool ChargePressed;
 
             /// <summary>
             /// Unset inputs.
@@ -28,18 +28,22 @@ namespace FaceSlapper.Network.Prediction
             public void ResetState()
             {
                 Jump = false;
-                ChargePressed = false;
             }
         }
 
         public struct ReplicateData : IReplicateData
         {
-            public ReplicateData(Vector2 input, bool run, OneTimeInput oneTimeInputs, bool charging, float cameraYaw)
+            public ReplicateData(
+                Vector2 input,
+                bool run,
+                OneTimeInput oneTimeInputs,
+                AbilityCommandBuffer abilities,
+                float cameraYaw)
             {
                 OneTimeInputs = oneTimeInputs;
+                Abilities = abilities;
                 Input = input;
                 Run = run;
-                IsCharging = charging;
                 CameraYaw = cameraYaw;
                 _tick = 0;
             }
@@ -48,6 +52,7 @@ namespace FaceSlapper.Network.Prediction
             /// True if Jump input was pressed for the tick.
             /// </summary>
             public OneTimeInput OneTimeInputs;
+            public AbilityCommandBuffer Abilities;
             /// <summary>
             /// Current movement directions held.
             /// </summary>
@@ -57,7 +62,6 @@ namespace FaceSlapper.Network.Prediction
             /// </summary>
             public readonly bool Run;
 
-            public readonly bool IsCharging;
             /// <summary>
             /// Camera yaw supplied by the owner, used to make movement deterministic.
             /// </summary>
@@ -70,6 +74,7 @@ namespace FaceSlapper.Network.Prediction
             public void Dispose()
             {
                 OneTimeInputs.ResetState();
+                Abilities.Clear();
             }
 
             public uint GetTick() => _tick;
@@ -86,6 +91,20 @@ namespace FaceSlapper.Network.Prediction
                 bool isCharging,
                 uint stunRemainingSteps,
                 Vector3 knockbackVelocity)
+                : this(position, rotation, verticalVelocity, stamina, isCharging,
+                    stunRemainingSteps, knockbackVelocity, default)
+            {
+            }
+
+            public ReconcileData(
+                Vector3 position,
+                Quaternion rotation,
+                float verticalVelocity,
+                float stamina,
+                bool isCharging,
+                uint stunRemainingSteps,
+                Vector3 knockbackVelocity,
+                AbilitySystemSnapshot abilities)
             {
                 Position = position;
                 Rotation = rotation;
@@ -94,6 +113,7 @@ namespace FaceSlapper.Network.Prediction
                 IsCharging = isCharging;
                 StunRemainingSteps = stunRemainingSteps;
                 KnockbackVelocity = knockbackVelocity;
+                Abilities = abilities;
                 _tick = 0;
             }
 
@@ -105,6 +125,7 @@ namespace FaceSlapper.Network.Prediction
             public bool IsCharging;
             public uint StunRemainingSteps;
             public Vector3 KnockbackVelocity;
+            public AbilitySystemSnapshot Abilities;
 
             private uint _tick;
             public void Dispose() { }
@@ -117,6 +138,7 @@ namespace FaceSlapper.Network.Prediction
         /// Invokes whenever NetworkStart is called for owner.
         /// </summary>
         public static event Action<PlayerControllerPrediction> OnOwner;
+        public event Action<AbilityCueEvent> OnAbilityCue;
         /// <summary>
         /// Current stamina remaining.
         /// </summary>
@@ -165,6 +187,10 @@ namespace FaceSlapper.Network.Prediction
 
         public PlayerStatusController Status { get; } = new();
         private PlayerCarryController _carryController;
+        private PlayerProjectileController _projectileController;
+        private PlayerAbilityRuntime _abilities;
+        private AbilityCommandBuffer _abilityCommands;
+        private uint _nextPredictionId;
 
         public bool IsCarried => _carryController != null && _carryController.IsCarried;
         public bool IsStunned => Status.IsStunned;
@@ -185,6 +211,7 @@ namespace FaceSlapper.Network.Prediction
         {
             _characterController = GetComponent<CharacterController>();
             _carryController = GetComponent<PlayerCarryController>();
+            _projectileController = GetComponent<PlayerProjectileController>();
 
             SetTickCallbacks(TickCallback.Tick | TickCallback.PostTick);
         }
@@ -204,6 +231,9 @@ namespace FaceSlapper.Network.Prediction
                 _verticalVelocity = Mathf.Max(_verticalVelocity, knockbackVelocity.y);
 
             State.IsCharging = false;
+            EnsureAbilityRuntime();
+            _abilities.SetStatus(true, IsCarried);
+            State.IsCharging = _abilities.HasTag(GameplayTag.StateCharging);
         }
 
         internal void SetCarriedState(bool carried)
@@ -212,7 +242,11 @@ namespace FaceSlapper.Network.Prediction
             _oneTimeInputs.ResetState();
 
             if (carried)
-                State.IsCharging = false;
+            {
+                EnsureAbilityRuntime();
+                _abilities.SetStatus(Status.IsStunned, true);
+                State.IsCharging = _abilities.HasTag(GameplayTag.StateCharging);
+            }
         }
 
         internal void ApplyCarriedPosition(Vector3 position)
@@ -246,7 +280,12 @@ namespace FaceSlapper.Network.Prediction
             if (UnityEngine.Input.GetKeyDown(KeyCode.Space))
                 _oneTimeInputs.Jump = true;
             if (UnityEngine.Input.GetKeyDown(KeyCode.Q))
-                _oneTimeInputs.ChargePressed = true;
+                BufferAbilityCommand(AbilityId.Charge, transform.forward);
+            if (UnityEngine.Input.GetKeyDown(KeyCode.E))
+                BufferAbilityCommand(AbilityId.ProjectileInteract, transform.forward);
+            if (_projectileController != null && _projectileController.HasProjectile
+                && UnityEngine.Input.GetMouseButtonDown(0))
+                BufferAbilityCommand(AbilityId.ProjectileThrow, GetAimDirection());
         }
 
         protected override void TimeManager_OnTick()
@@ -286,10 +325,11 @@ namespace FaceSlapper.Network.Prediction
             UnityEngine.Camera playerCamera = UnityEngine.Camera.main;
             float cameraYaw = playerCamera != null ? playerCamera.transform.eulerAngles.y : transform.eulerAngles.y;
 
-            ReplicateData md = new(new(horizontal, vertical), run, _oneTimeInputs, State.IsCharging, cameraYaw);
+            ReplicateData md = new(new(horizontal, vertical), run, _oneTimeInputs, _abilityCommands, cameraYaw);
 
             // Reset one tine inputs since they've been processed for the tick.
             _oneTimeInputs.ResetState();
+            _abilityCommands.Clear();
 
             return md;
         }
@@ -330,13 +370,19 @@ namespace FaceSlapper.Network.Prediction
                 Stamina,
                 State.IsCharging,
                 Status.StunRemainingSteps,
-                Status.KnockbackVelocity);
+                Status.KnockbackVelocity,
+                _abilities.CaptureSnapshot());
             PerformReconcile(rd);
         }
 
         [Replicate]
         private void PerformReplicate(ReplicateData rd, ReplicateState state = ReplicateState.Invalid, Channel channel = Channel.Unreliable)
         {
+            EnsureAbilityRuntime();
+            _abilities.AdvanceTick(Status.IsStunned, IsCarried);
+            RunAbilityCommands(rd.Abilities, state);
+            State.IsCharging = _abilities.HasTag(GameplayTag.StateCharging);
+
             if (IsCarried)
             {
                 // Ignore all owner input while carried, but keep updating the predicted transform.
@@ -409,7 +455,7 @@ namespace FaceSlapper.Network.Prediction
                          *
                          * We're going to unset jump for this reason. */
                         rd.OneTimeInputs.Jump = false;
-                        rd.OneTimeInputs.ChargePressed = false;
+                        rd.Abilities.Clear();
 
                         /* Be aware that future predicting is not a one-size fits all
                          * feature. How much you predict into the future, if at all, depends
@@ -460,9 +506,6 @@ namespace FaceSlapper.Network.Prediction
 
             _verticalVelocity += Physics.gravity.y * delta * 3f;
             _verticalVelocity = Mathf.Max(_verticalVelocity, -40f);
-
-            if (canControl && rd.OneTimeInputs.ChargePressed)
-                State.IsCharging = !State.IsCharging;
 
             if (State.IsCharging)
             {
@@ -518,7 +561,11 @@ namespace FaceSlapper.Network.Prediction
 
             _verticalVelocity = rd.VerticalVelocity;
             Stamina = rd.Stamina;
-            State.IsCharging = rd.IsCharging;
+            EnsureAbilityRuntime();
+            _abilities.Reconcile(rd.Abilities);
+            State.IsCharging = rd.Abilities.Initialized
+                ? _abilities.HasTag(GameplayTag.StateCharging)
+                : rd.IsCharging;
             Status.Reconcile(rd.StunRemainingSteps, rd.KnockbackVelocity);
 
             /* Disable the CharacterController before applying the authoritative
@@ -550,5 +597,68 @@ namespace FaceSlapper.Network.Prediction
             Stamina -= value;
             return true;
         }
+
+        private void EnsureAbilityRuntime()
+        {
+            if (_abilities != null)
+                return;
+
+            float tickDelta = TimeManager != null && TimeManager.TickDelta > 0d
+                ? (float)TimeManager.TickDelta
+                : 1f / 30f;
+            _abilities = new PlayerAbilityRuntime(tickDelta);
+            _abilities.Cue += cue => OnAbilityCue?.Invoke(cue);
+        }
+
+        private void BufferAbilityCommand(AbilityId ability, Vector3 aimDirection)
+        {
+            _abilityCommands.TryAdd(new AbilityCommand
+            {
+                Ability = ability,
+                Phase = AbilityInputPhase.Pressed,
+                PredictionId = ++_nextPredictionId,
+                AimDirection = aimDirection
+            });
+        }
+
+        private Vector3 GetAimDirection()
+        {
+            UnityEngine.Camera playerCamera = UnityEngine.Camera.main;
+            return playerCamera != null ? playerCamera.transform.forward : transform.forward;
+        }
+
+        private void RunAbilityCommands(AbilityCommandBuffer commands, ReplicateState state)
+        {
+            if (!state.ContainsCreated())
+                return;
+
+            AbilityExecutionContext context;
+            if (IsServerStarted)
+                context = AbilityExecutionContext.Server;
+            else if (IsOwner && state.ContainsTicked() && !state.ContainsReplayed())
+                context = AbilityExecutionContext.OwnerFirstExecution;
+            else if (state.ContainsReplayed())
+                context = AbilityExecutionContext.Replay;
+            else
+                context = AbilityExecutionContext.Spectator;
+
+            for (int i = 0; i < commands.Count; i++)
+                _abilities.TryActivate(commands.Get(i), context, this, ValidateAbilityExecution);
+        }
+
+        private bool ValidateAbilityExecution(AbilityCommand command)
+        {
+            if (command.Ability == AbilityId.Charge)
+                return true;
+
+            // Projectile world mutation is migrated in the next task. Until then this
+            // validates component availability while keeping simulation deterministic.
+            return _projectileController != null;
+        }
+
+        float IAbilityResource.Current => Stamina;
+        bool IAbilityResource.CanSpend(float amount) => amount >= 0f && Stamina >= amount;
+        bool IAbilityResource.TrySpend(float amount) => amount >= 0f && TryRemoveStamina(amount);
+        void IAbilityResource.Refund(float amount) => ModifyStamina(amount);
     }
 }
