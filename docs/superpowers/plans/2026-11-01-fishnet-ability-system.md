@@ -66,19 +66,19 @@ Add `bool AbilityCommandBuffer.TryAdd(AbilityCommand value)`, `AbilityCommand Ge
 - Consumes: Task 1 ability value types.
 - Produces: `IAbilityResource`, `AbilityExecutionContext`, `PredictedAbilityRuntime.AdvanceTick`, `TryActivate`, `CaptureSnapshot`, `Reconcile`, `HasTag`, and `Cue`.
 
-- [ ] **Step 1: Add failing runtime tests**
+- [x] **Step 1: Add failing runtime tests**
 
 Cover required/blocked tags, stamina cost, cooldown decrement, toggle tags, external-tag cancellation, first-execution cue emission, replay cue suppression, accepted decision confirmation, rejected decision rollback, skipped reconcile packets, and prediction-id wraparound.
 
-- [ ] **Step 2: Run tests and verify failures reference unimplemented runtime behavior**
+- [x] **Step 2: Run tests and verify failures reference unimplemented runtime behavior**
 
-- [ ] **Step 3: Implement four-slot snapshot state and 32-entry local pending ledger**
+- [x] **Step 3: Implement four-slot snapshot state and 32-entry local pending ledger**
 
 Use a 64-bit rejection window plus highest-processed watermark. Reconcile runtime state before FishNet replay but retain pending ids newer than the watermark.
 
-- [ ] **Step 4: Run focused tests and verify all runtime cases pass**
+- [x] **Step 4: Run focused tests and verify all runtime cases pass**
 
-- [ ] **Step 5: Commit the runtime**
+- [x] **Step 5: Commit the runtime**
 
 ### Task 3: Integrate abilities with player prediction
 
