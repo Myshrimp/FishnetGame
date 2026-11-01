@@ -159,4 +159,4 @@ Verify Q charge no longer uses `ChargePressed`, migrated projectile interaction 
 
 Only source, tests, metas, and design/plan documents should change.
 
-- [ ] **Step 4: Commit final documentation and verification adjustments**
+- [x] **Step 4: Commit final documentation and verification adjustments**
