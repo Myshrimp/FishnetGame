@@ -50,6 +50,7 @@ GameObject:
   - component: {fileID: 8026038889136661728}
   - component: {fileID: 153978696559328608}
   - component: {fileID: 8026038889136661729}
+  - component: {fileID: 5128938166124126888}
   m_Layer: 0
   m_Name: Player
   m_TagString: Untagged
@@ -282,6 +283,34 @@ MonoBehaviour:
     serializedVersion: 2
     m_Bits: 4294967295
   _interactionCooldown: 0.15
+--- !u!114 &5128938166124126888
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 841504549367432042}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 4aa316abe15243bfa2d05f28fe9a20df, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  _componentIndexCache: 255
+  _addedNetworkObject: {fileID: 8507615456043245900}
+  _networkObjectCache: {fileID: 0}
+  _tickCallbacks: 6
+  _casts:
+  - Name: FireBall
+    AuthoritativePrefab: {fileID: 1310440387639354637, guid: 36f04aae775773b409f7a4982a4f7942,
+      type: 3}
+    ViewPrefab: {fileID: 3666108064698345720, guid: 6e527c1b01538eb44b502e3671192456,
+      type: 3}
+    Cooldown: 0
+    SpawnOffset: 0
+    Speed: 10
+  _castOrigin: {fileID: 4276597705165733457}
+  _castKey: 114
+  _viewTimeout: 2
 --- !u!1 &942793117609265119
 GameObject:
   m_ObjectHideFlags: 0

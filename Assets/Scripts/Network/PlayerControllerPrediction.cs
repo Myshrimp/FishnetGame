@@ -21,6 +21,7 @@ namespace FaceSlapper.Network.Prediction
             /// </summary>
             public bool Jump;
             public bool ChargePressed;
+            public bool Cast;
 
             /// <summary>
             /// Unset inputs.
